@@ -21,8 +21,10 @@ export function openWS(path, onMessage, onError) {
     onMessage(data, ws);
   });
   if (onError) {
+    // Only the `error` event is a real failure. A `close` (even non-clean) can
+    // happen normally when the server finishes its work and returns, so we do
+    // NOT treat close as an error — that would clobber a final status message.
     ws.addEventListener("error", () => onError(new Error(`websocket error: ${path}`)));
-    ws.addEventListener("close", (e) => { if (!e.wasClean) onError(new Error("websocket closed")); });
   }
   return ws;
 }

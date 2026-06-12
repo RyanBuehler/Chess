@@ -167,10 +167,25 @@ function applyUci(map, uci) {
   }
   map.set(to, promo ? { role: roleOf(promo), color: piece.color } : piece);
 }
-function mapToCg(map) {
-  const pieces = new Map();
-  for (const [s, p] of map) pieces.set(s, { role: p.role, color: p.color });
-  return pieces;
+// Full-FEN board field from the piece map. We must replace the WHOLE board
+// state each step: chessground's setPieces() is a sparse diff and never
+// clears vacated squares (the "cloned pieces" bug).
+function fenFromMap(map) {
+  const letter = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
+  const ranks = [];
+  for (let r = 7; r >= 0; r--) {
+    let row = "", empty = 0;
+    for (let f = 0; f < 8; f++) {
+      const p = map.get(sq(f, r));
+      if (!p) { empty++; continue; }
+      if (empty) { row += empty; empty = 0; }
+      const ch = letter[p.role];
+      row += p.color === "white" ? ch.toUpperCase() : ch;
+    }
+    if (empty) row += empty;
+    ranks.push(row);
+  }
+  return ranks.join("/");
 }
 
 function renderReplay() {
@@ -178,8 +193,7 @@ function renderReplay() {
   const map = startMap();
   for (let i = 0; i < replay.idx; i++) applyUci(map, replay.moves[i]);
   const last = replay.idx > 0 ? lastMovePair(replay.moves[replay.idx - 1]) : undefined;
-  board.set({ fen: undefined, lastMove: last });
-  board.setPieces(mapToCg(map));
+  board.set({ fen: fenFromMap(map), lastMove: last });
   setStatus("rp-status", `${replay.idx}/${replay.moves.length}  ${replay.result || ""}`);
 }
 

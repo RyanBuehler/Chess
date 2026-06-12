@@ -149,17 +149,47 @@ def test_dashboard(server, browser):
         page.wait_for_selector("#replay-board piece")
 
         page.click("#rp-play")
-        # Wait for the status counter to advance to N/M with N >= 1.
+        # Wait for the counter to advance well into the game (>= 5 plies) so
+        # vacated squares exist — that's what catches stale-piece rendering.
         page.wait_for_function(
-            r"() => /[1-9]\d*\/\d+/.test(document.getElementById('rp-status').textContent)",
-            timeout=15000,
+            r"() => parseInt(document.getElementById('rp-status').textContent) >= 5",
+            timeout=20000,
         )
+        page.click("#rp-play")  # pause so the ply index stays fixed
         status = page.inner_text("#rp-status")
         import re
-        assert re.search(r"[1-9]\d*/\d+", status), f"counter did not advance: {status!r}"
 
-        # Board has piece elements.
-        assert len(page.query_selector_all("#replay-board piece")) > 0
+        m = re.match(r"(\d+)/(\d+)", status.strip())
+        assert m and int(m.group(1)) >= 5, f"counter did not advance: {status!r}"
+        ply = int(m.group(1))
+
+        # POSITION CORRECTNESS: rendered piece count must equal ground truth
+        # from python-chess at the same ply. chessground's setPieces() is a
+        # sparse diff that never clears vacated squares; anything but a
+        # full-state set leaves clones behind (the "cloned pieces" bug).
+        import chess as pychess
+        import httpx
+
+        run_id = page.inner_text("#sel-run").strip()
+        game_name = page.inner_text("#game-list li").strip()
+        moves = httpx.get(
+            f"{server}/api/runs/{run_id}/games/{game_name}/moves"
+        ).json()["moves"]
+        truth = pychess.Board()
+        for uci in moves[:ply]:
+            truth.push(pychess.Move.from_uci(uci))
+        expected = len(truth.piece_map())
+        # Let chessground's move/fade animation (~200ms) settle: fading-out
+        # elements remain in the DOM briefly and would inflate the count.
+        page.wait_for_timeout(500)
+        # Exclude chessground's permanent hidden drag-ghost placeholder.
+        rendered = len(
+            page.query_selector_all("#replay-board piece:not(.fading):not(.ghost)")
+        )
+        assert rendered == expected, (
+            f"board shows {rendered} pieces but the position after ply {ply} "
+            f"has {expected} (stale/cloned pieces?)"
+        )
 
         _assert_no_console_errors(errors)
 

@@ -1,0 +1,7 @@
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 2
+  agent_simulations: 50
+  max_plies: 120
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50

@@ -66,12 +66,15 @@ def _build_stockfish_players(cfg: EvalConfig) -> list:
     """(player, kind, anchor_elo) tuples for Stockfish rungs; empty if disabled."""
     if not cfg.stockfish_path:
         return []
+    # Resolve to absolute path so subprocess_exec works on Windows (which requires
+    # absolute paths or PATH-resolvable commands, not relative paths).
+    sf_path = str(Path(cfg.stockfish_path).resolve())
     out = []
     for nodes in _NODE_RUNGS:
-        out.append((StockfishPlayer(cfg.stockfish_path, nodes=nodes,
+        out.append((StockfishPlayer(sf_path, nodes=nodes,
                                     name=f"sf_nodes{nodes}"), "rung", None))
     for elo in _ANCHOR_ELOS:
-        out.append((StockfishPlayer(cfg.stockfish_path, elo=elo,
+        out.append((StockfishPlayer(sf_path, elo=elo,
                                     movetime_ms=cfg.stockfish_movetime_ms,
                                     name=f"sf_elo{elo}"), "anchor", float(elo)))
     return out

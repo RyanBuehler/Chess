@@ -216,7 +216,10 @@ class StockfishPlayer:
     def _start(self) -> None:
         self._engine = chess.engine.SimpleEngine.popen_uci(self._path)
         self._engine_id = self._engine.id.get("name", "stockfish")
-        opts = {"Threads": 1, "Ponder": False}
+        # Ponder is managed by python-chess internally and must NOT be passed to
+        # configure(); setting it raises EngineError. Include only the options we
+        # can actually set: Threads and (optionally) UCI strength-limiting options.
+        opts = {"Threads": 1}
         if self._elo is not None:
             opts["UCI_LimitStrength"] = True
             opts["UCI_Elo"] = self._elo
@@ -241,12 +244,12 @@ class StockfishPlayer:
     def play(self, board: chess.Board) -> chess.Move:
         for attempt in range(2):                    # one auto-restart retry
             try:
-                result = self._engine.play(
-                    board, self._limit(), timeout=self._timeout_s
-                )
+                result = self._engine.play(board, self._limit())
                 if result.move is None:
                     raise StockfishError("engine returned no move")
                 return result.move
+            except StockfishError:
+                raise
             except Exception:
                 if attempt == 0:
                     self._restart()

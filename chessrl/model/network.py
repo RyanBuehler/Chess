@@ -1,4 +1,6 @@
 """Policy-value ResNet (AlphaZero-style, configurable size)."""
+from pathlib import Path
+
 import chess
 import numpy as np
 import torch
@@ -65,3 +67,41 @@ class NetEvaluator:
         logits, value = self.net(x)
         policy = torch.softmax(logits[0], dim=0).cpu().numpy()
         return policy, float(value.item())
+
+
+class BatchedNetEvaluator:
+    """Batched evaluator: one net, one batched forward per call. Owns its net
+    and calls .eval() once at construction so it never shares a live training
+    module with a Trainer (the documented train/eval seam). Used by batched MCTS
+    and the self-play workers."""
+
+    def __init__(self, net: PolicyValueNet, device: str = "cpu"):
+        self.device = device
+        self.net = net.to(device)
+        self.net.eval()
+
+    @classmethod
+    def from_checkpoint(
+        cls, path, network_cfg: NetworkConfig, device: str = "cpu"
+    ) -> "BatchedNetEvaluator":
+        net = PolicyValueNet(network_cfg)
+        ckpt = torch.load(Path(path), map_location=device)
+        net.load_state_dict(ckpt["model"])
+        return cls(net, device=device)
+
+    @torch.no_grad()
+    def evaluate_many(self, boards: list) -> tuple[np.ndarray, np.ndarray]:
+        """boards: list[chess.Board]. Returns (policies (N,4672) softmaxed
+        float32, values (N,) float32). Empty input -> empty arrays."""
+        n = len(boards)
+        if n == 0:
+            return (
+                np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+            )
+        stacked = np.stack([to_model_input(encode_board(b)) for b in boards])
+        x = torch.from_numpy(stacked).to(self.device)
+        logits, value = self.net(x)
+        policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
+        values = value.squeeze(1).cpu().numpy().astype(np.float32)
+        return policies, values

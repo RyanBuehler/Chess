@@ -115,7 +115,11 @@ def test_nodes_rung_does_not_hang(tmp_path):
     # Write a minimal UCI stub: handles uci + isready, ignores everything else.
     stub = tmp_path / "hang_stub.py"
     stub.write_text(
-        "import sys\n"
+        # Watchdog: a hung engine ignores 'quit' too, so python-chess cannot
+        # shut it down and Windows never reaps the orphan (it then wedges any
+        # shell pipeline waiting on the process tree). Self-destruct instead.
+        "import os, sys, threading\n"
+        "threading.Timer(15, lambda: os._exit(0)).start()\n"
         "for line in sys.stdin:\n"
         "    line = line.strip()\n"
         "    if line == 'uci':\n"
@@ -123,7 +127,8 @@ def test_nodes_rung_does_not_hang(tmp_path):
         "        print('uciok', flush=True)\n"
         "    elif line == 'isready':\n"
         "        print('readyok', flush=True)\n"
-        "    # 'go' and 'quit' are silently ignored — engine hangs forever on go\n",
+        "    # 'go' and 'quit' are silently ignored — engine hangs forever on go\n"
+        "os._exit(0)\n",
         encoding="utf-8",
     )
 

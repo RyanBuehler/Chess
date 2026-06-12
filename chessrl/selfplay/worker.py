@@ -92,10 +92,16 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     while not stop_path.exists():
         newest = _newest_checkpoint(run_dir)
         if newest is not None and newest != loaded_ckpt:
-            evaluator = BatchedNetEvaluator.from_checkpoint(
-                newest, cfg.network, device=resolved_device
-            )
-            loaded_ckpt = newest
+            try:
+                evaluator = BatchedNetEvaluator.from_checkpoint(
+                    newest, cfg.network, device=resolved_device
+                )
+                loaded_ckpt = newest
+            except Exception:
+                # Half-written or vanishing checkpoint: keep playing with the
+                # current net and retry on the next loop. Never crash a worker
+                # over this - spawn restarts cost 10-20s each.
+                pass
         counter = run_one_batch(run_dir, worker_id, evaluator, cfg, rng, counter)
         # tight loop is fine; the sentinel check between batches paces shutdown.
         time.sleep(0.01)

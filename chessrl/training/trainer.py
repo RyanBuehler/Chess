@@ -1,4 +1,5 @@
 """SGD loop with pacing budget, AMP, and checkpointing."""
+import os
 from pathlib import Path
 
 import numpy as np
@@ -54,10 +55,14 @@ class Trainer:
         d = self.run_dir / "checkpoints"
         d.mkdir(parents=True, exist_ok=True)
         path = d / f"ckpt_{self.step:08d}.pt"
+        # torch.save is not atomic; write to a temp name and os.replace so
+        # concurrent readers (workers, evaluator) never see a half-written file.
+        tmp = path.with_suffix(".pt.tmp")
         torch.save(
             {"step": self.step, "model": self.net.state_dict(), "optimizer": self.opt.state_dict()},
-            path,
+            tmp,
         )
+        os.replace(tmp, path)
         return path
 
     def load_checkpoint(self, path: str | Path) -> None:

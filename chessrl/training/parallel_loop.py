@@ -195,6 +195,11 @@ def main(argv=None) -> Path:
             }
             with metrics_path.open("a") as f:
                 f.write(json.dumps(metrics) + "\n")
+            # Flush counters every cycle so a hard crash (which skips finally)
+            # still resumes with honest pacing; the buffer rebuilds from disk.
+            (run_dir / "state.json").write_text(
+                json.dumps({"games": baseline_games + games_seen, "positions": total_positions})
+            )
 
             if added == 0 and steps_done == 0:
                 time.sleep(1.0)

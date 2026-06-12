@@ -36,6 +36,8 @@ def play_game(evaluator, mcts_cfg: MCTSConfig, sp_cfg: SelfPlayConfig,
             choice = int(rng.choice(idxs, p=counts / counts.sum()))
         else:
             choice = int(idxs[counts.argmax()])
+        # Record before the resign check: the search that triggered resignation
+        # is still a valid training example for this position.
         builder.add(board, idxs.astype(np.int32), counts.astype(np.int32), choice)
         if root_q < sp_cfg.resign_threshold:
             resign_streak[board.turn] += 1

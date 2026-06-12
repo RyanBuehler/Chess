@@ -57,7 +57,7 @@ class BatchedMCTS:
 
     def run(self, tree: SearchTree) -> None:
         """Advance a single tree to cfg.simulations (drives K-leaf rounds)."""
-        while tree.sims_done < self.cfg.simulations:
+        while tree.root.visit_count < self.cfg.simulations + 1:
             self.step_round([tree])
 
     def step_round(self, trees: list) -> None:
@@ -67,10 +67,10 @@ class BatchedMCTS:
         k = self.cfg.leaves_per_tree
         parked = []   # (tree, path, board_at_leaf) awaiting GPU evaluation
         for tree in trees:
-            if tree.sims_done >= self.cfg.simulations:
+            if tree.root.visit_count >= self.cfg.simulations + 1:
                 continue
             for _ in range(k):
-                if tree.sims_done >= self.cfg.simulations:
+                if tree.root.visit_count >= self.cfg.simulations + 1:
                     break
                 path = self._select_leaf(tree)
                 leaf = path[-1]
@@ -118,18 +118,9 @@ class BatchedMCTS:
             self._expand(tree.root, tree.board, policy, value, is_terminal=False)
             tree.root.visit_count += 1
             tree.root.value_sum += value
-        elif child.children:
-            # When this node was first visited as a leaf its own visit_count got
-            # +1 from backup but its children got 0 visits. Add 1 visit (at the
-            # same q-value, so q() is preserved) to the most-visited grandchild
-            # to restore the invariant: children_sum == root.visit_count - 1.
-            # This "ghost visit" accounts for the initial leaf-expansion sim and
-            # ensures run() tops up children_sum to exactly cfg.simulations.
-            gc = max(child.children.values(), key=lambda n: n.visit_count)
-            if gc.visit_count > 0:
-                gc.value_sum += gc.q()  # preserves q() after visit_count += 1
-            gc.visit_count += 1
-        tree.sims_done = tree.root.visit_count
+        # No ghost visit: child's true statistics are kept intact.
+        # sims_done is derived from root.visit_count so run() tops up correctly.
+        tree.sims_done = tree.root.visit_count - 1
 
     def add_root_noise(self, tree: SearchTree) -> None:
         if tree.root.children:

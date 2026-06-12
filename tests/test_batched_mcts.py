@@ -100,13 +100,26 @@ def test_advance_reuses_subtree():
     visits = mcts.visit_counts(tree)
     best = max(visits, key=visits.get)
     reused_count_before = visits[best]
+
+    # Capture grandchildren visit counts before advance to verify no mutation.
+    chosen_child = tree.root.children[best]
+    grandchild_visits_before = {i: c.visit_count for i, c in chosen_child.children.items()}
+    grandchild_values_before = {i: c.value_sum for i, c in chosen_child.children.items()}
+
     mcts.advance(tree, best)
-    # After re-rooting, sims_done equals the reused child's visit count, so the
-    # new root already carries accumulated statistics (reuse, not a fresh tree).
-    assert tree.sims_done == reused_count_before
+
+    # advance() must NOT mutate the reused child's children statistics.
+    assert {i: c.visit_count for i, c in tree.root.children.items()} == grandchild_visits_before
+    assert {i: c.value_sum for i, c in tree.root.children.items()} == grandchild_values_before
+
+    # After re-rooting, the new root carries its true accumulated statistics.
     assert tree.root.visit_count == reused_count_before
+    assert tree.sims_done == reused_count_before - 1
+
     mcts.run(tree)
-    assert sum(mcts.visit_counts(tree).values()) >= 64  # topped up to simulations
+    # After topping up, root is at simulations + 1 and children sum exactly to simulations.
+    assert tree.root.visit_count == cfg.simulations + 1
+    assert sum(mcts.visit_counts(tree).values()) == cfg.simulations
 
 
 def test_step_round_drives_multiple_trees():

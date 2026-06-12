@@ -13,13 +13,14 @@ from chessrl.config.config import MCTSConfig
 
 
 class Node:
-    __slots__ = ("prior", "visit_count", "value_sum", "children")
+    __slots__ = ("prior", "visit_count", "value_sum", "children", "vloss")
 
     def __init__(self, prior: float):
         self.prior = prior
         self.visit_count = 0
         self.value_sum = 0.0
         self.children: dict[int, "Node"] = {}
+        self.vloss = 0      # virtual loss (batched MCTS only; reference leaves it at 0)
 
     def q(self) -> float:
         return self.value_sum / self.visit_count if self.visit_count else 0.0

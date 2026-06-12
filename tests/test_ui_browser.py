@@ -119,7 +119,7 @@ def _assert_no_console_errors(errors):
 
 
 # --------------------------------------------------------------------------- #
-# Dashboard
+# Dashboard — charts-only page (NO game browser)
 # --------------------------------------------------------------------------- #
 def test_dashboard(server, browser):
     with page_with_console(browser) as (page, errors):
@@ -143,8 +143,50 @@ def test_dashboard(server, browser):
         assert page.query_selector("#loss-chart canvas") is not None
         assert page.query_selector("#elo-chart canvas") is not None
 
-        # Click the first game, then play.
+        # Game browser must NOT be on the dashboard page.
+        assert page.query_selector("#browser") is None, \
+            "#browser section should not exist on the dashboard"
+        assert page.query_selector("#game-list") is None, \
+            "#game-list should not exist on the dashboard"
+        assert page.query_selector("#replay-board") is None, \
+            "#replay-board should not exist on the dashboard"
+
+        # Axis labels recorded on window.__chartAxes.
+        axes = page.evaluate("() => window.__chartAxes || {}")
+        assert axes.get("loss-chart", {}).get("x") == "step", \
+            f"loss-chart x-axis label wrong: {axes.get('loss-chart')}"
+        assert axes.get("loss-chart", {}).get("y") == "loss", \
+            f"loss-chart y-axis label wrong: {axes.get('loss-chart')}"
+        assert axes.get("rate-chart", {}).get("y") == "games / hour", \
+            f"rate-chart y-axis label wrong: {axes.get('rate-chart')}"
+        assert axes.get("elo-chart", {}).get("y") == "Elo", \
+            f"elo-chart y-axis label wrong: {axes.get('elo-chart')}"
+
+        _assert_no_console_errors(errors)
+
+
+# --------------------------------------------------------------------------- #
+# Replays — game browser + replayer
+# --------------------------------------------------------------------------- #
+def test_replays(server, browser):
+    with page_with_console(browser) as (page, errors):
+        page.set_default_timeout(30000)
+        page.goto(server + "/replays.html", wait_until="networkidle")
+
+        # Run list is populated.
+        page.wait_for_selector("#run-list li")
+        runs = page.query_selector_all("#run-list li")
+        assert len(runs) >= 1
+
+        # Click the newest baseline run.
+        baseline = page.query_selector("#run-list li:has-text('baseline')")
+        assert baseline is not None, "no baseline run in list"
+        baseline.click()
+
+        # Game list appears.
         page.wait_for_selector("#game-list li")
+
+        # Click the first game, then play.
         page.query_selector("#game-list li").click()
         page.wait_for_selector("#replay-board piece")
 
@@ -171,9 +213,11 @@ def test_dashboard(server, browser):
         import httpx
 
         run_id = page.inner_text("#sel-run").strip()
-        game_name = page.inner_text("#game-list li").strip()
+        game_name = page.query_selector("#game-list li.selected")
+        game_name_text = game_name.inner_text().strip() if game_name else \
+            page.inner_text("#game-list li").strip()
         moves = httpx.get(
-            f"{server}/api/runs/{run_id}/games/{game_name}/moves"
+            f"{server}/api/runs/{run_id}/games/{game_name_text}/moves"
         ).json()["moves"]
         truth = pychess.Board()
         for uci in moves[:ply]:
@@ -191,6 +235,40 @@ def test_dashboard(server, browser):
             f"has {expected} (stale/cloned pieces?)"
         )
 
+        _assert_no_console_errors(errors)
+
+
+# --------------------------------------------------------------------------- #
+# Auto-refresh — dashboard refreshes metrics endpoint periodically
+# --------------------------------------------------------------------------- #
+def test_autorefresh(server, browser):
+    with page_with_console(browser) as (page, errors):
+        page.set_default_timeout(30000)
+
+        # Track requests to any metrics endpoint.
+        metrics_requests: list[str] = []
+        page.on("request", lambda req: metrics_requests.append(req.url)
+                if "/metrics" in req.url else None)
+
+        page.goto(server + "/index.html?refresh=1", wait_until="networkidle")
+
+        # Wait for initial load: run list + charts rendered.
+        page.wait_for_selector("#run-list li")
+        page.wait_for_selector("#loss-chart canvas")
+
+        # Snapshot how many metrics requests happened during initial load.
+        initial_count = len(metrics_requests)
+
+        # Wait ~3.5 seconds — at refresh=1s, expect at least 2 more fetches.
+        page.wait_for_timeout(3500)
+
+        additional = len(metrics_requests) - initial_count
+        assert additional >= 2, (
+            f"Expected >= 2 additional metrics fetches after 3.5s with refresh=1, "
+            f"got {additional}"
+        )
+
+        # Zero console errors throughout.
         _assert_no_console_errors(errors)
 
 
@@ -311,6 +389,13 @@ def test_compare(server, browser):
         page.wait_for_selector("#elo-chart canvas", timeout=15000)
         assert page.query_selector("#elo-chart canvas") is not None, \
             "Elo chart canvas not found"
+
+        # Refresh indicator is present (auto-refresh: 30s by default).
+        indicator = page.query_selector("#refresh-indicator")
+        assert indicator is not None, "refresh-indicator element missing on compare"
+        indicator_text = indicator.inner_text()
+        assert "auto-refresh" in indicator_text, \
+            f"refresh-indicator text unexpected: {indicator_text!r}"
 
         # Switch x-axis to "hours" — chart should re-render without errors.
         page.click("input[name='xaxis'][value='hours']")

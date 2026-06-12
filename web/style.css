@@ -148,6 +148,14 @@ input[type="range"] { accent-color: var(--accent); }
 .uci-row { margin-top: .5rem; }
 .uci-row input { width: 7rem; }
 
+/* Auto-refresh indicator. */
+.refresh-indicator {
+  color: var(--muted);
+  font-size: .8rem;
+  font-family: var(--mono);
+  margin-bottom: .5rem;
+}
+
 /* Compare page. */
 .compare-chart { width: 100%; max-width: 900px; margin: .25rem 0 .5rem; }
 .compare-table { width: 100%; border-collapse: collapse; font-size: .9rem; }

@@ -441,6 +441,68 @@ function rebuildCharts() {
 }
 
 // -----------------------------------------------------------------------
+// Auto-refresh helpers
+// -----------------------------------------------------------------------
+
+// Parse ?refresh=<seconds> from query string. Default 30, min 1, 0 = off.
+function getRefreshSeconds() {
+  const params = new URLSearchParams(location.search);
+  const raw = params.get("refresh");
+  if (raw === null) return 30;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return 30;
+  return n;
+}
+
+function updateRefreshIndicator(seconds) {
+  const el = document.getElementById("refresh-indicator");
+  if (!el) return;
+  el.textContent = seconds > 0 ? `auto-refresh: ${seconds}s` : "auto-refresh: off";
+}
+
+// Save checked state keyed by run_id before re-fetching.
+function snapshotChecked() {
+  const map = {};
+  for (const m of runMeta) map[m.run_id] = m.checked;
+  return map;
+}
+
+async function refreshCompare() {
+  // Snapshot current UI state so we can restore it after refetch.
+  const checkedSnapshot = snapshotChecked();
+  const xAxisSnapshot = currentXAxis;
+
+  // Re-fetch all data.
+  let runs;
+  try {
+    runs = await fetchAll();
+  } catch (e) {
+    // Silently skip on transient error — don't wipe existing display.
+    return;
+  }
+  if (!runs.length) return;
+
+  // Restore checkbox states: existing runs keep their checked state,
+  // newly appeared runs default to checked (already set by fetchAll).
+  for (const m of runMeta) {
+    if (checkedSnapshot.hasOwnProperty(m.run_id)) {
+      m.checked = checkedSnapshot[m.run_id];
+    }
+    // New run_ids not in snapshot remain checked (default from fetchAll).
+  }
+
+  // Restore x-axis selection.
+  currentXAxis = xAxisSnapshot;
+  document.querySelectorAll("input[name='xaxis']").forEach((r) => {
+    r.checked = r.value === currentXAxis;
+  });
+
+  clearError();
+  buildSummaryTable();
+  rebuildCharts();
+}
+
+// -----------------------------------------------------------------------
 // Init
 // -----------------------------------------------------------------------
 
@@ -457,6 +519,9 @@ document.querySelectorAll("input[name='xaxis']").forEach((radio) => {
 // Fetch data, populate table, build charts.
 (async () => {
   try {
+    const refreshSeconds = getRefreshSeconds();
+    updateRefreshIndicator(refreshSeconds);
+
     const runs = await fetchAll();
     if (runs.length === 0) {
       document.getElementById("summary-body").innerHTML =
@@ -466,6 +531,13 @@ document.querySelectorAll("input[name='xaxis']").forEach((radio) => {
     clearError();
     buildSummaryTable();
     rebuildCharts();
+
+    // Schedule auto-refresh when tab is visible.
+    if (refreshSeconds > 0) {
+      setInterval(() => {
+        if (!document.hidden) refreshCompare();
+      }, refreshSeconds * 1000);
+    }
   } catch (e) {
     showError("Compare page error: " + e.message);
   }

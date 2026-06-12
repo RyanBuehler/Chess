@@ -4,41 +4,30 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>chessrl — dashboard</title>
-  <link rel="stylesheet" href="/vendor/chessground.base.css" />
-  <link rel="stylesheet" href="/vendor/chessground.brown.css" />
-  <link rel="stylesheet" href="/vendor/chessground.cburnett.css" />
   <link rel="stylesheet" href="/vendor/uPlot.min.css" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <nav class="topnav">
-    <span class="brand">♞ chessrl</span>
+    <span class="brand">&#9822; chessrl</span>
     <a href="/index.html" class="active">Dashboard</a>
+    <a href="/replays.html">Replays</a>
     <a href="/live.html">Live</a>
     <a href="/play.html">Play</a>
     <a href="/arena.html">Arena</a>
     <a href="/compare.html">Compare</a>
   </nav>
   <main>
-    <section id="runs"><h2>Runs</h2><ul id="run-list"></ul></section>
+    <section id="runs">
+      <h2>Runs</h2>
+      <ul id="run-list"></ul>
+    </section>
     <section id="charts">
       <h2>Metrics <small id="sel-run"></small></h2>
+      <div id="refresh-indicator" class="refresh-indicator"></div>
       <div id="loss-chart" class="chart"></div>
       <div id="rate-chart" class="chart"></div>
       <div id="elo-chart" class="chart"></div>
-    </section>
-    <section id="browser">
-      <h2>Game browser</h2>
-      <ul id="game-list"></ul>
-      <div id="replay">
-        <div id="replay-board" class="board-md"></div>
-        <div class="controls">
-          <button id="rp-prev">&#9664; prev</button>
-          <button id="rp-play">&#9654; play</button>
-          <button id="rp-next">next &#9654;&#9654;</button>
-          <span id="rp-status" class="hint"></span>
-        </div>
-      </div>
     </section>
   </main>
   <!-- uPlot ships an IIFE build exposing window.uPlot. -->

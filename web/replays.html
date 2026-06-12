@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chessrl — replays</title>
+  <link rel="stylesheet" href="/vendor/chessground.base.css" />
+  <link rel="stylesheet" href="/vendor/chessground.brown.css" />
+  <link rel="stylesheet" href="/vendor/chessground.cburnett.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">&#9822; chessrl</span>
+    <a href="/index.html">Dashboard</a>
+    <a href="/replays.html" class="active">Replays</a>
+    <a href="/live.html">Live</a>
+    <a href="/play.html">Play</a>
+    <a href="/arena.html">Arena</a>
+    <a href="/compare.html">Compare</a>
+  </nav>
+  <main>
+    <section id="runs">
+      <h2>Runs</h2>
+      <ul id="run-list"></ul>
+    </section>
+    <section id="browser">
+      <h2>Game browser <small id="sel-run"></small></h2>
+      <div class="controls" style="margin-bottom:.5rem;">
+        <button id="refresh-games">&#8635; refresh list</button>
+      </div>
+      <ul id="game-list"></ul>
+      <div id="replay">
+        <div id="replay-board" class="board-md"></div>
+        <div class="controls">
+          <button id="rp-prev">&#9664; prev</button>
+          <button id="rp-play">&#9654; play</button>
+          <button id="rp-next">next &#9654;&#9654;</button>
+          <span id="rp-status" class="hint"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/replays.js"></script>
+</body>
+</html>

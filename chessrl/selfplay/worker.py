@@ -55,12 +55,15 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int) -> Batched
 
 def run_one_batch(
     run_dir, worker_id: int, evaluator: BatchedNetEvaluator, cfg: RunConfig,
-    rng: np.random.Generator, start_counter: int,
+    rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
     Returns the next free counter."""
     results = play_games_concurrent(
-        evaluator, cfg.mcts, cfg.selfplay, rng, num_games=cfg.selfplay.concurrent_games
+        evaluator, cfg.mcts, cfg.selfplay, rng,
+        num_games=cfg.selfplay.concurrent_games,
+        publisher=publisher,
+        game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
     )
     games_dir = Path(run_dir) / "games"
     meta_path = Path(run_dir) / f"games_meta_w{worker_id:02d}.jsonl"
@@ -79,6 +82,8 @@ def run_one_batch(
 
 
 def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> None:
+    from chessrl.selfplay.feed import FeedPublisher, NullPublisher
+
     run_dir = Path(run_dir)
     stop_path = Path(stop_path)
     cfg = RunConfig.from_json(run_dir / "config.json")
@@ -89,19 +94,34 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     evaluator = _build_evaluator(run_dir, cfg, resolved_device, cfg.training.seed)
     loaded_ckpt: Path | None = _newest_checkpoint(run_dir)
 
-    while not stop_path.exists():
-        newest = _newest_checkpoint(run_dir)
-        if newest is not None and newest != loaded_ckpt:
-            try:
-                evaluator = BatchedNetEvaluator.from_checkpoint(
-                    newest, cfg.network, device=resolved_device
-                )
-                loaded_ckpt = newest
-            except Exception:
-                # Half-written or vanishing checkpoint: keep playing with the
-                # current net and retry on the next loop. Never crash a worker
-                # over this - spawn restarts cost 10-20s each.
-                pass
-        counter = run_one_batch(run_dir, worker_id, evaluator, cfg, rng, counter)
-        # tight loop is fine; the sentinel check between batches paces shutdown.
-        time.sleep(0.01)
+    publisher = NullPublisher()
+    if cfg.selfplay.feed_port > 0:
+        try:
+            publisher = FeedPublisher(cfg.selfplay.feed_port + worker_id)
+        except Exception:
+            publisher = NullPublisher()             # feed is best-effort, never fatal
+
+    batch_index = 0
+    try:
+        while not stop_path.exists():
+            newest = _newest_checkpoint(run_dir)
+            if newest is not None and newest != loaded_ckpt:
+                try:
+                    evaluator = BatchedNetEvaluator.from_checkpoint(
+                        newest, cfg.network, device=resolved_device
+                    )
+                    loaded_ckpt = newest
+                except Exception:
+                    # Half-written or vanishing checkpoint: keep playing with the
+                    # current net and retry on the next loop. Never crash a worker
+                    # over this - spawn restarts cost 10-20s each.
+                    pass
+            counter = run_one_batch(
+                run_dir, worker_id, evaluator, cfg, rng, counter,
+                publisher=publisher, batch_index=batch_index,
+            )
+            batch_index += 1
+            # tight loop is fine; the sentinel check between batches paces shutdown.
+            time.sleep(0.01)
+    finally:
+        publisher.close()

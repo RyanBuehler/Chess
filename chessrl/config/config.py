@@ -34,6 +34,7 @@ class SelfPlayConfig:
     games_per_iteration: int = 10
     workers: int = 4                     # M5: number of self-play worker processes
     concurrent_games: int = 32           # M5: concurrent game trees per worker batch
+    feed_port: int = 0                   # M7: live-feed base PUB port (0 = disabled, no zmq). Worker w binds feed_port + w.
 
 
 @dataclass(frozen=True)

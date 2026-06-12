@@ -11,8 +11,10 @@ import chess
 import numpy as np
 
 from chessrl.chess_env.game import terminal_value
+from chessrl.chess_env.moves import index_to_move
 from chessrl.config.config import MCTSConfig, SelfPlayConfig
 from chessrl.mcts.batched import BatchedMCTS
+from chessrl.selfplay.feed import NullPublisher
 from chessrl.selfplay.records import GameRecord, RecordBuilder
 
 
@@ -21,7 +23,7 @@ class _Game:
 
     __slots__ = (
         "tree", "builder", "board", "allow_resign", "resign_streak",
-        "ply", "done", "z", "resigned", "would_resign_side",
+        "ply", "done", "z", "resigned", "would_resign_side", "game_id",
     )
 
     def __init__(self, tree, board: chess.Board, allow_resign: bool):
@@ -35,6 +37,7 @@ class _Game:
         self.z = 0
         self.resigned = False
         self.would_resign_side = None   # chess.Color of side that would resign, or None
+        self.game_id = ""               # M7: stable per-game topic for the live feed
 
 
 def play_games_concurrent(
@@ -43,17 +46,25 @@ def play_games_concurrent(
     sp_cfg: SelfPlayConfig,
     rng: np.random.Generator,
     num_games: int,
+    publisher=None,
+    game_id_prefix: str = "",
 ) -> list:
     """Returns list[(GameRecord, final_board, z, meta)] of length num_games,
-    in slot order. z is from White's perspective (+1/0/-1)."""
+    in slot order. z is from White's perspective (+1/0/-1). If `publisher` is
+    given, every applied move is published to the live feed under the per-game
+    topic f"{game_id_prefix}{slot}"; a terminal done=True frame is published when
+    a game ends."""
+    publisher = publisher or NullPublisher()
     mcts = BatchedMCTS(evaluator_many, mcts_cfg, rng)
 
     games: list[_Game] = []
-    for _ in range(num_games):
+    for slot in range(num_games):
         board = chess.Board()
         allow_resign = rng.random() >= sp_cfg.resign_playout_fraction
         tree = mcts.init_tree(board, add_noise=True)
-        games.append(_Game(tree, board, allow_resign))
+        g = _Game(tree, board, allow_resign)
+        g.game_id = f"{game_id_prefix}{slot}"          # NEW: stable per-game topic
+        games.append(g)
 
     # Resolve any game that is already terminal / over the cap before searching.
     for g in games:
@@ -69,7 +80,7 @@ def play_games_concurrent(
             mcts.step_round(trees)
 
         for g in active:
-            _play_one_move(g, mcts, mcts_cfg, sp_cfg, rng)
+            _play_one_move(g, mcts, mcts_cfg, sp_cfg, rng, publisher)
 
     results = []
     for g in games:
@@ -98,7 +109,7 @@ def _check_pre_move_termination(g: _Game, sp_cfg: SelfPlayConfig) -> None:
 
 def _play_one_move(
     g: _Game, mcts: BatchedMCTS, mcts_cfg: MCTSConfig, sp_cfg: SelfPlayConfig,
-    rng: np.random.Generator,
+    rng: np.random.Generator, publisher,
 ) -> None:
     visits = mcts.visit_counts(g.tree)
     root_q = mcts.root_q(g.tree)
@@ -112,6 +123,17 @@ def _play_one_move(
     # Record before the resign check (the triggering search is a valid example).
     g.builder.add(g.board, idxs.astype(np.int32), counts.astype(np.int32), choice)
 
+    # Decode the chosen move BEFORE committing (need the pre-move board context),
+    # and build top-5 (uci, visit_frac) from the root visit distribution.
+    flip = g.board.turn == chess.BLACK
+    chosen_move = index_to_move(choice, flip, g.board)
+    total = float(counts.sum())
+    order = np.argsort(counts)[::-1][:5]
+    top_moves = [
+        [index_to_move(int(idxs[k]), flip, g.board).uci(), float(counts[k] / total)]
+        for k in order
+    ]
+
     if root_q < sp_cfg.resign_threshold:
         g.resign_streak[g.board.turn] += 1
         if g.resign_streak[g.board.turn] >= sp_cfg.resign_consecutive:
@@ -121,6 +143,7 @@ def _play_one_move(
                 g.z = -1 if g.board.turn == chess.WHITE else 1
                 g.resigned = True
                 g.done = True
+                _publish_move(publisher, g, chosen_move, root_q, top_moves)
                 return
     else:
         g.resign_streak[g.board.turn] = 0
@@ -132,6 +155,20 @@ def _play_one_move(
     g.ply += 1
     mcts.add_root_noise(g.tree)
     _check_pre_move_termination(g, sp_cfg)
+    _publish_move(publisher, g, chosen_move, root_q, top_moves)
+
+
+def _publish_move(publisher, g: _Game, chosen_move, root_q: float, top_moves: list) -> None:
+    publisher.publish(g.game_id, {
+        "game_id": g.game_id,
+        "fen": g.board.fen(),
+        "last_move_uci": chosen_move.uci(),
+        "ply": g.ply,
+        "root_q": float(root_q),
+        "top_moves": top_moves,
+        "done": bool(g.done),
+        "z": int(g.z) if g.done else None,
+    })
 
 
 def _is_false_positive(g: _Game) -> bool:

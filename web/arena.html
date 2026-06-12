@@ -1,0 +1,37 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>chessrl — arena</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css"/>
+<link rel="stylesheet" href="/style.css"/>
+</head><body>
+<nav class="topnav"><a href="/index.html">Dashboard</a><a href="/live.html">Live</a><a href="/play.html">Play</a><a href="/arena.html" class="active">Arena</a></nav>
+<main style="grid-template-columns:auto 1fr;">
+  <div>
+    <div class="controls">
+      <label>White <select id="white-kind"></select></label>
+      <select id="white-ckpt" class="ckpt-pick" hidden></select>
+    </div>
+    <div class="controls">
+      <label>Black <select id="black-kind"></select></label>
+      <select id="black-ckpt" class="ckpt-pick" hidden></select>
+    </div>
+    <div class="controls">
+      <label>delay <input id="delay" type="range" min="0" max="2000" value="500"/></label>
+      <span id="delay-val">500ms</span>
+    </div>
+    <div class="controls">
+      <button id="start">Start</button>
+      <button id="pause">Pause</button>
+      <button id="resume">Resume</button>
+      <button id="step">Step</button>
+      <button id="stop">Stop</button>
+    </div>
+    <div id="arena-board" class="board-lg"></div>
+    <div id="arena-status" class="hint"></div>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/chessground@9/dist/chessground.min.js"></script>
+<script type="module" src="/arena.js"></script>
+</body></html>

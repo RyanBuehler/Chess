@@ -1,0 +1,16 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>chessrl — live</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css"/>
+<link rel="stylesheet" href="/style.css"/>
+</head><body>
+<nav class="topnav"><a href="/index.html">Dashboard</a><a href="/live.html" class="active">Live</a><a href="/play.html">Play</a><a href="/arena.html">Arena</a></nav>
+<main style="grid-template-columns:1fr;">
+  <h2>Live self-play <small id="live-hint" class="hint"></small></h2>
+  <div id="live-grid"></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/chessground@9/dist/chessground.min.js"></script>
+<script type="module" src="/live.js"></script>
+</body></html>

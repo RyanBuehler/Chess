@@ -1,0 +1,27 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>chessrl — play</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css"/>
+<link rel="stylesheet" href="/style.css"/>
+</head><body>
+<nav class="topnav"><a href="/index.html">Dashboard</a><a href="/live.html">Live</a><a href="/play.html" class="active">Play</a><a href="/arena.html">Arena</a></nav>
+<main style="grid-template-columns:auto auto 1fr;">
+  <div>
+    <div class="controls">
+      <select id="run"></select>
+      <select id="ckpt"></select>
+      <label>sims <input id="sims" type="number" value="100" min="1" style="width:5rem"/></label>
+      <select id="color"><option value="white">White</option><option value="black">Black</option></select>
+      <button id="newgame">New game</button>
+    </div>
+    <div id="play-board" class="board-lg"></div>
+    <div id="status" class="hint"></div>
+  </div>
+  <div class="eval-bar"><div id="eval-fill" class="eval-fill"></div></div>
+  <div><h3>Agent thoughts</h3><ul id="thoughts" class="thoughts"></ul></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/chessground@9/dist/chessground.min.js"></script>
+<script type="module" src="/play.js"></script>
+</body></html>

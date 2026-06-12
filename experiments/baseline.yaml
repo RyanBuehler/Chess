@@ -1,0 +1,25 @@
+# M8 baseline: the first real training run.
+# 6x64 net (spec starting size), 200 sims, 4 GPU workers, live feed on.
+run_name: baseline
+network: {blocks: 6, filters: 64}
+mcts: {simulations: 200, temperature_moves: 30, leaves_per_tree: 1}
+selfplay:
+  workers: 4
+  concurrent_games: 32
+  ply_cap: 512
+  feed_port: 5555            # workers publish on 5555..5558
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  buffer_size: 500000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 500
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 2
+  agent_simulations: 50
+  max_plies: 160
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50

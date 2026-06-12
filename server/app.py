@@ -39,6 +39,14 @@ def create_app(runs_root, cfg=None, device: str = "cpu") -> FastAPI:
     def get_runs():
         return catalog.list_runs(runs_root)
 
+    @app.get("/api/runs/{run_id}/provenance")
+    def get_provenance(run_id: str):
+        rdir = _require_run(run_id)
+        p = rdir / "provenance.json"
+        if not p.exists():
+            raise HTTPException(status_code=404, detail="provenance not found")
+        return catalog._read_json(p, default={})
+
     @app.get("/api/runs/{run_id}/metrics")
     def get_metrics(run_id: str):
         return catalog.read_jsonl(_require_run(run_id) / "metrics.jsonl")

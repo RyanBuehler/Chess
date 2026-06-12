@@ -3,7 +3,6 @@ This module IS the smoke pipeline; scripts/train.py is a thin wrapper."""
 import argparse
 import json
 import random
-import subprocess
 import time
 from pathlib import Path
 
@@ -16,23 +15,8 @@ from chessrl.model.network import NetEvaluator, PolicyValueNet
 from chessrl.selfplay.pgn_io import save_pgn
 from chessrl.selfplay.play import play_game
 from chessrl.training.buffer import ReplayBuffer
+from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
-
-
-def _provenance() -> dict:
-    """Spec-required run provenance: every curve must be traceable to exactly
-    the code and toolchain that produced it. Best-effort on the git hash."""
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
-        ).stdout.strip() or None
-    except OSError:
-        commit = None
-    return {
-        "git_commit": commit,
-        "torch_version": torch.__version__,
-        "cuda_version": torch.version.cuda,
-    }
 
 
 def main(argv=None) -> Path:
@@ -53,7 +37,7 @@ def main(argv=None) -> Path:
         run_dir = Path(args.runs_root) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
         (run_dir / "games").mkdir(parents=True)
         (run_dir / "config.json").write_text(cfg.to_json())
-        (run_dir / "provenance.json").write_text(json.dumps(_provenance(), indent=2))
+        (run_dir / "provenance.json").write_text(json.dumps(build_provenance(cfg), indent=2))
         game_no = total_positions = 0
 
     seed = cfg.training.seed

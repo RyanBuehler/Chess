@@ -9,7 +9,6 @@ import argparse
 import json
 import multiprocessing as mp
 import random
-import subprocess
 import time
 from pathlib import Path
 
@@ -20,28 +19,15 @@ from chessrl.config.config import RunConfig
 from chessrl.model.network import PolicyValueNet
 from chessrl.selfplay.worker import worker_main
 from chessrl.training.buffer import ReplayBuffer
+from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
-
-
-def _provenance() -> dict:
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
-        ).stdout.strip() or None
-    except OSError:
-        commit = None
-    return {
-        "git_commit": commit,
-        "torch_version": torch.__version__,
-        "cuda_version": torch.version.cuda,
-    }
 
 
 def make_run_dir(cfg: RunConfig, runs_root) -> Path:
     run_dir = Path(runs_root) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
     (run_dir / "games").mkdir(parents=True)
     (run_dir / "config.json").write_text(cfg.to_json())
-    (run_dir / "provenance.json").write_text(json.dumps(_provenance(), indent=2))
+    (run_dir / "provenance.json").write_text(json.dumps(build_provenance(cfg), indent=2))
     return run_dir
 
 

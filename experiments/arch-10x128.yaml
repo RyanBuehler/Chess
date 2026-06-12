@@ -1,7 +1,8 @@
-# M8 baseline: the first real training run.
-# 6x64 net (spec starting size), 200 sims, 4 GPU workers, live feed on.
-run_name: baseline
-network: {blocks: 6, filters: 64}
+# arch-10x128: isolates the architecture axis vs baseline (6x64).
+# Identical to baseline except run_name, network, and eval.games_per_rung.
+# Sims stay at 200 so the only variable is network depth/width.
+run_name: arch-10x128
+network: {blocks: 10, filters: 128}
 mcts: {simulations: 200, temperature_moves: 30, leaves_per_tree: 1}
 selfplay:
   workers: 4

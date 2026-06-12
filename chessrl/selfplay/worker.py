@@ -1,0 +1,101 @@
+"""Self-play worker process: spawn-safe, sentinel-file controlled.
+
+worker_main is a top-level function so the spawn start method can re-import and
+call it. It polls run_dir/config.json's run config, loads the newest checkpoint
+when one appears, plays batches of concurrent games, and writes sparse records,
+PGNs, and per-game meta lines. A run_dir/STOP sentinel file (not a
+multiprocessing.Event) signals shutdown -- simpler across spawn and debuggable.
+"""
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from chessrl.config.config import RunConfig
+from chessrl.model.network import BatchedNetEvaluator, PolicyValueNet
+from chessrl.selfplay.concurrent import play_games_concurrent
+from chessrl.selfplay.pgn_io import save_pgn
+
+
+def next_counter_for_worker(run_dir, worker_id: int) -> int:
+    """Highest existing counter for this worker id + 1 (0 if none). Makes the
+    counter collision-proof across process restarts."""
+    prefix = f"game_w{worker_id:02d}_"
+    best = -1
+    for f in (Path(run_dir) / "games").glob(f"{prefix}*.npz"):
+        stem = f.stem  # game_wWW_CCCCCCC
+        try:
+            best = max(best, int(stem[len(prefix):]))
+        except ValueError:
+            continue
+    return best + 1
+
+
+def _resolve_device(requested: str) -> str:
+    return requested if (requested == "cpu" or torch.cuda.is_available()) else "cpu"
+
+
+def _newest_checkpoint(run_dir) -> Path | None:
+    ckpts = sorted((Path(run_dir) / "checkpoints").glob("ckpt_*.pt"))
+    return ckpts[-1] if ckpts else None
+
+
+def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int) -> BatchedNetEvaluator:
+    """Newest checkpoint if present, else a fresh net seeded identically across
+    workers so a cold-start run begins from the same weights everywhere."""
+    ckpt = _newest_checkpoint(run_dir)
+    if ckpt is not None:
+        return BatchedNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
+    torch.manual_seed(seed)
+    net = PolicyValueNet(cfg.network)
+    return BatchedNetEvaluator(net, device=device)
+
+
+def run_one_batch(
+    run_dir, worker_id: int, evaluator: BatchedNetEvaluator, cfg: RunConfig,
+    rng: np.random.Generator, start_counter: int,
+) -> int:
+    """Play one batch of concurrent_games games, persist them, append meta.
+    Returns the next free counter."""
+    results = play_games_concurrent(
+        evaluator, cfg.mcts, cfg.selfplay, rng, num_games=cfg.selfplay.concurrent_games
+    )
+    games_dir = Path(run_dir) / "games"
+    meta_path = Path(run_dir) / f"games_meta_w{worker_id:02d}.jsonl"
+    counter = start_counter
+    with meta_path.open("a") as mf:
+        for rec, final_board, z, meta in results:
+            name = f"game_w{worker_id:02d}_{counter:07d}"
+            rec.save(games_dir / f"{name}.npz")
+            save_pgn(final_board, z, games_dir / f"{name}.pgn")
+            line = dict(meta)
+            line["game"] = name
+            line["worker"] = worker_id
+            mf.write(json.dumps(line) + "\n")
+            counter += 1
+    return counter
+
+
+def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> None:
+    run_dir = Path(run_dir)
+    stop_path = Path(stop_path)
+    cfg = RunConfig.from_json(run_dir / "config.json")
+    resolved_device = _resolve_device(device)
+    rng = np.random.default_rng(cfg.training.seed + 1000 * worker_id)
+
+    counter = next_counter_for_worker(run_dir, worker_id)
+    evaluator = _build_evaluator(run_dir, cfg, resolved_device, cfg.training.seed)
+    loaded_ckpt: Path | None = _newest_checkpoint(run_dir)
+
+    while not stop_path.exists():
+        newest = _newest_checkpoint(run_dir)
+        if newest is not None and newest != loaded_ckpt:
+            evaluator = BatchedNetEvaluator.from_checkpoint(
+                newest, cfg.network, device=resolved_device
+            )
+            loaded_ckpt = newest
+        counter = run_one_batch(run_dir, worker_id, evaluator, cfg, rng, counter)
+        # tight loop is fine; the sentinel check between batches paces shutdown.
+        time.sleep(0.01)

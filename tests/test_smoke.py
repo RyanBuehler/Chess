@@ -23,6 +23,8 @@ def _launch(tmp_path, extra):
 def test_smoke_pipeline(tmp_path):
     run_dir = _launch(tmp_path, [])
     assert (run_dir / "config.json").exists()
+    prov = json.loads((run_dir / "provenance.json").read_text())
+    assert prov["torch_version"]  # git_commit may be None outside a repo
     assert len(list((run_dir / "games").glob("*.npz"))) == 2
     assert len(list((run_dir / "games").glob("*.pgn"))) == 2
     assert len(list((run_dir / "checkpoints").glob("ckpt_*.pt"))) == 1

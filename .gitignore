@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# chessrl project
+.venv/
+*.pyc
+runs/

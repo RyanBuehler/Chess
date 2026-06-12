@@ -1,0 +1,23 @@
+[project]
+name = "chessrl"
+version = "0.1.0"
+description = "AlphaZero-style chess RL research platform"
+requires-python = ">=3.11"
+dependencies = [
+    "chess>=1.10",
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["chessrl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

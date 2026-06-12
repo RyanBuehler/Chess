@@ -1,0 +1,5 @@
+run_name: dev-tiny
+network: {blocks: 2, filters: 32}
+mcts: {simulations: 32}
+selfplay: {ply_cap: 120, games_per_iteration: 4}
+training: {batch_size: 64, buffer_size: 20000, device: cpu}

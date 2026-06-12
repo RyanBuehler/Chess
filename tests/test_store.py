@@ -74,3 +74,40 @@ def test_ingest_inbox_skips_bad_json(tmp_path):
 def test_wal_mode_enabled(tmp_path):
     store = LadderStore(tmp_path / "ladder.sqlite")
     assert store.journal_mode().lower() == "wal"
+
+
+def test_result_triples_excludes_arena_source_by_default(tmp_path):
+    store = LadderStore(tmp_path / "ladder.sqlite")
+    # evaluator-style result (no source key in conditions)
+    store.record_result("agentA", "random", z=1, opening=0, conditions={"checkpoint": "ckpt_10.pt"})
+    # arena result (source = "arena")
+    store.record_result("random", "greedy", z=-1, opening=1, conditions={"source": "arena"})
+
+    # default: arena results excluded
+    default_triples = store.result_triples()
+    assert len(default_triples) == 1
+    assert default_triples[0] == ("agentA", "random", 1)
+
+    # exclude_sources=() -> no filter, both rows returned
+    all_triples = store.result_triples(exclude_sources=())
+    assert len(all_triples) == 2
+    assert ("agentA", "random", 1) in all_triples
+    assert ("random", "greedy", -1) in all_triples
+
+
+def test_result_triples_malformed_conditions_kept(tmp_path):
+    """Rows whose conditions field is not valid JSON must NOT be dropped."""
+    store = LadderStore(tmp_path / "ladder.sqlite")
+    # Write a row with malformed conditions bypassing record_result (direct SQL).
+    import sqlite3, time
+    con = sqlite3.connect(store.path)
+    con.execute(
+        "INSERT INTO results(ts,white,black,z,opening,conditions) VALUES (?,?,?,?,?,?)",
+        (time.time(), "x", "y", 1, 0, "not-json"),
+    )
+    con.commit(); con.close()
+
+    triples = store.result_triples()   # default exclude_sources=("arena",)
+    # malformed row has no parseable source -> kept
+    assert len(triples) == 1
+    assert triples[0] == ("x", "y", 1)

@@ -102,10 +102,27 @@ class LadderStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def result_triples(self) -> list:
+    def result_triples(self, exclude_sources: tuple[str, ...] = ("arena",)) -> list:
+        """Return (white, black, z) triples for the rating fit.
+
+        Rows whose conditions JSON has a 'source' key in *exclude_sources* are
+        skipped.  Malformed conditions are kept (treated as having no source).
+        """
         with self._connect() as con:
-            rows = con.execute("SELECT white, black, z FROM results ORDER BY id").fetchall()
-        return [(r["white"], r["black"], int(r["z"])) for r in rows]
+            rows = con.execute(
+                "SELECT white, black, z, conditions FROM results ORDER BY id"
+            ).fetchall()
+        result = []
+        for r in rows:
+            if exclude_sources:
+                try:
+                    cond = json.loads(r["conditions"])
+                    if cond.get("source") in exclude_sources:
+                        continue
+                except (json.JSONDecodeError, AttributeError):
+                    pass  # malformed conditions -> keep the row
+            result.append((r["white"], r["black"], int(r["z"])))
+        return result
 
     def all_players(self) -> dict:
         with self._connect() as con:

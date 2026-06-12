@@ -89,7 +89,13 @@ class GameRoom:
     def root_q(self) -> float:
         return float(getattr(self.agent, "_last_root_q", 0.0))
 
-    def state_msg(self) -> dict:
+    def state_msg(self, mover: str | None = None) -> dict:
+        """Build the state payload for the client.
+
+        mover: "human" | "agent" | None (start-of-game / unknown).
+        The JS eval-bar uses mover to decide when to normalize eval and in which
+        direction, because msg.eval is always from the agent's search perspective.
+        """
         return {
             "type": "state",
             "fen": self.board.fen(),
@@ -98,6 +104,7 @@ class GameRoom:
             "thoughts": self.thoughts(),
             "status": _status(self.board),
             "turn": "white" if self.board.turn == chess.WHITE else "black",
+            "mover": mover,
         }
 
 
@@ -126,7 +133,9 @@ def register_play_ws(app):
                         continue
                     if room.agent_to_move():
                         await asyncio.to_thread(room.agent_move)
-                    await ws.send_json(room.state_msg())
+                        await ws.send_json(room.state_msg(mover="agent"))
+                    else:
+                        await ws.send_json(room.state_msg(mover=None))
                 elif mtype == "move":
                     if room.agent is None:
                         await ws.send_json({"type": "error", "message": "no game"})
@@ -134,10 +143,10 @@ def register_play_ws(app):
                     if not room.apply_human(msg.get("uci", "")):
                         await ws.send_json({"type": "error", "message": "illegal move"})
                         continue
-                    await ws.send_json(room.state_msg())
+                    await ws.send_json(room.state_msg(mover="human"))
                     if room.agent_to_move():
                         await asyncio.to_thread(room.agent_move)
-                        await ws.send_json(room.state_msg())
+                        await ws.send_json(room.state_msg(mover="agent"))
                 else:
                     await ws.send_json({"type": "error", "message": "unknown type"})
         except WebSocketDisconnect:

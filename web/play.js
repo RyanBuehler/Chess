@@ -40,10 +40,15 @@ function applyState(msg) {
   lastFen = msg.fen;
   board.set({ fen: msg.fen.split(" ")[0], lastMove: lastMovePair(msg.last_move),
     turn: msg.turn, movable: { color: msg.turn === myColor ? myColor : undefined } });
-  // eval bar: root_q in [-1,1] from side-to-move -> normalize to white's view
-  const q = msg.turn === "white" ? msg.eval : -msg.eval;
-  const pct = Math.round((q + 1) / 2 * 100);
-  document.getElementById("eval-fill").style.height = pct + "%";
+  // eval bar: msg.eval is from the agent's search perspective (agent's color).
+  // Only update the bar after an agent move (msg.mover === "agent").
+  if (msg.mover === "agent") {
+    const agentColor = myColor === "white" ? "black" : "white";
+    // Normalize from agent's perspective to white's absolute perspective.
+    const q = agentColor === "white" ? msg.eval : -msg.eval;
+    const pct = Math.round((q + 1) / 2 * 100);
+    document.getElementById("eval-fill").style.height = pct + "%";
+  }
   const t = document.getElementById("thoughts");
   t.innerHTML = "";
   for (const [uci, frac] of (msg.thoughts || [])) {

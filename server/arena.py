@@ -26,8 +26,6 @@ from chessrl.evaluation.match import _RESULT_STR
 from chessrl.evaluation.openings import opening_board
 from server import catalog
 
-_RESULT_STR_LOCAL = {1: "1-0", -1: "0-1", 0: "1/2-1/2"}
-
 
 def _build_player(spec: dict, runs_root: Path, cfg, device: str):
     kind = spec.get("kind")
@@ -186,7 +184,7 @@ def register_arena_ws(app):
                     "black": black_name, **cond_w}
             inbox_name = _write_inbox(runs_root, white_name, black_name, z,
                                       opening_idx, cond)
-            result_str = _RESULT_STR.get(z, _RESULT_STR_LOCAL.get(z, "*"))
+            result_str = _RESULT_STR.get(z, "*")
             await ws.send_json({"type": "gameover", "z": z,
                                 "result": result_str, "inbox": inbox_name})
         except WebSocketDisconnect:

@@ -1,6 +1,7 @@
 """FastAPI app factory: read-only REST catalog + websocket routes (wired in
 later tasks) + static web/ mount. create_app(runs_root, cfg, device) is the
 single entry point used by scripts/serve.py and every test."""
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,7 +15,16 @@ _WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
 def create_app(runs_root, cfg=None, device: str = "cpu") -> FastAPI:
     runs_root = Path(runs_root)
-    app = FastAPI(title="chessrl server")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        # Shutdown: stop the LiveHub background thread if it was created.
+        hub = getattr(app.state, "_live_hub", None)
+        if hub is not None:
+            hub.stop()
+
+    app = FastAPI(title="chessrl server", lifespan=lifespan)
     app.state.runs_root = runs_root
     app.state.cfg = cfg
     app.state.device = device

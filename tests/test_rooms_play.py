@@ -45,6 +45,7 @@ def test_play_human_white_full_exchange(tmp_path):
             human_state = ws.receive_json()
             assert human_state["type"] == "state"
             assert human_state["last_move"] == uci
+            assert human_state.get("mover") == "human"
             agent_state = ws.receive_json()
             assert agent_state["type"] == "state"
             assert "eval" in agent_state
@@ -52,6 +53,7 @@ def test_play_human_white_full_exchange(tmp_path):
             assert len(agent_state["thoughts"]) <= 5
             # the board is back to white to move after the agent replied
             assert agent_state["fen"].split()[1] == "w"
+            assert agent_state.get("mover") == "agent"
 
 
 def test_play_illegal_move_errors_without_advancing(tmp_path):

@@ -1,64 +1,137 @@
 // web/dashboard.js
-import { getJSON, makeBoard, lastMovePair } from "/common.js";
+import { getJSON, makeBoard, lastMovePair, showError, setStatus } from "./common.js";
 
-let selectedRun = null;
 let board = null;
 let replay = { moves: [], idx: 0, timer: null, result: "" };
 
+// uPlot dark theme colors.
+const AXIS_STROKE = "#9aa0b5";
+const GRID_STROKE = "#2b2d3a";
+const SERIES = ["#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#f7768e"];
+
 async function init() {
-  const runs = await getJSON("/api/runs");
+  // Wire replay controls FIRST so they work even if board init fails.
+  wireReplayControls();
+
+  // Board init is fragile (chessground); never let it kill the page.
+  try {
+    board = makeBoard(document.getElementById("replay-board"));
+  } catch (e) {
+    showError("Board failed to initialize: " + e.message);
+  }
+
+  let runs = [];
+  try {
+    runs = await getJSON("/api/runs");
+  } catch (e) {
+    showError("Failed to load runs: " + e.message);
+    return;
+  }
+  // Newest first (catalog returns ascending by run_id; reverse for newest-first).
+  runs = runs.slice().reverse();
+
   const ul = document.getElementById("run-list");
   ul.innerHTML = "";
+  if (!runs.length) { ul.innerHTML = "<li class='hint'>(no runs found)</li>"; return; }
   for (const r of runs) {
     const li = document.createElement("li");
-    const step = (r.state && r.state.step) ?? "—";
-    li.textContent = `${r.run_id}  (step ${step})`;
-    li.onclick = () => selectRun(r.run_id);
+    const games = (r.state && r.state.games) ?? "—";
+    li.textContent = `${r.run_id}`;
+    const sub = document.createElement("small");
+    sub.className = "muted";
+    sub.textContent = ` ${games} games`;
+    li.appendChild(sub);
+    li.onclick = () => selectRun(r.run_id, li);
     ul.appendChild(li);
   }
-  board = makeBoard(document.getElementById("replay-board"));
-  if (runs.length) selectRun(runs[0].run_id);
-  wireReplayControls();
+  // Auto-select the newest run (first in the reversed list).
+  selectRun(runs[0].run_id, ul.firstChild);
 }
 
-function lineChart(elId, xs, ys, label) {
+function markSelected(ul, li) {
+  for (const c of ul.children) c.classList.remove("selected");
+  if (li) li.classList.add("selected");
+}
+
+function lineChart(elId, xs, seriesDefs, title) {
   const el = document.getElementById(elId);
   el.innerHTML = "";
-  if (!xs.length) { el.textContent = `(no ${label} data)`; return; }
+  const hasData = xs.length && seriesDefs.some((s) => s.data.some((v) => v != null));
+  if (!hasData) { el.innerHTML = `<div class="hint">(no ${title} data)</div>`; return; }
+  const series = [{ label: "step", stroke: AXIS_STROKE }];
+  const data = [xs];
+  seriesDefs.forEach((s, i) => {
+    series.push({ label: s.label, stroke: SERIES[i % SERIES.length], width: 2, spanGaps: true });
+    data.push(s.data);
+  });
   new uPlot({
-    width: el.clientWidth || 360, height: 180, title: label,
+    width: el.clientWidth || 420, height: 200, title,
     scales: { x: { time: false } },
-    series: [{ label: "step" }, { label, stroke: "#3b6ea5" }],
-  }, [xs, ys], el);
+    series,
+    axes: [
+      { stroke: AXIS_STROKE, grid: { stroke: GRID_STROKE }, ticks: { stroke: GRID_STROKE } },
+      { stroke: AXIS_STROKE, grid: { stroke: GRID_STROKE }, ticks: { stroke: GRID_STROKE } },
+    ],
+    legend: { live: false },
+  }, data, el);
 }
 
-async function selectRun(runId) {
-  selectedRun = runId;
+async function selectRun(runId, li) {
+  if (li && li.parentElement) markSelected(li.parentElement, li);
   document.getElementById("sel-run").textContent = runId;
-  const metrics = await getJSON(`/api/runs/${runId}/metrics`);
-  const elo = await getJSON(`/api/runs/${runId}/elo`);
+  let metrics = [], elo = [];
+  try {
+    [metrics, elo] = await Promise.all([
+      getJSON(`/api/runs/${runId}/metrics`),
+      getJSON(`/api/runs/${runId}/elo`),
+    ]);
+  } catch (e) {
+    showError("Failed to load metrics/elo: " + e.message);
+    return;
+  }
   const steps = metrics.map((m) => m.step);
-  lineChart("loss-chart", steps, metrics.map((m) => m.loss ?? null), "loss");
-  lineChart("rate-chart", steps, metrics.map((m) => m.games_per_hour ?? null), "games/hr");
-  lineChart("elo-chart", elo.map((e) => e.step), elo.map((e) => e.elo), "Elo");
+  lineChart("loss-chart", steps, [
+    { label: "policy_loss", data: metrics.map((m) => m.policy_loss ?? null) },
+    { label: "value_loss", data: metrics.map((m) => m.value_loss ?? null) },
+  ], "Training loss");
+  lineChart("rate-chart", steps, [
+    { label: "games/hr", data: metrics.map((m) => m.games_per_hour ?? null) },
+  ], "Self-play throughput");
+  lineChart("elo-chart", elo.map((e) => e.step), [
+    { label: "Elo", data: elo.map((e) => e.elo) },
+  ], "Evaluator Elo");
   await loadGames(runId);
 }
 
 async function loadGames(runId) {
-  const games = await getJSON(`/api/runs/${runId}/games`);
+  let games = [];
+  try {
+    games = await getJSON(`/api/runs/${runId}/games`);
+  } catch (e) {
+    showError("Failed to load games: " + e.message);
+    return;
+  }
   const ul = document.getElementById("game-list");
   ul.innerHTML = "";
-  for (const g of games.slice(0, 200)) {
+  if (!games.length) { ul.innerHTML = "<li class='hint'>(no games)</li>"; return; }
+  // Newest games first.
+  for (const g of games.slice().reverse().slice(0, 200)) {
     const li = document.createElement("li");
     li.textContent = g.name;
-    li.onclick = () => loadReplay(runId, g.name);
+    li.onclick = () => { markSelected(ul, li); loadReplay(runId, g.name); };
     ul.appendChild(li);
   }
 }
 
 async function loadReplay(runId, name) {
-  const data = await getJSON(`/api/runs/${runId}/games/${name}/moves`);
   stopPlay();
+  let data;
+  try {
+    data = await getJSON(`/api/runs/${runId}/games/${name}/moves`);
+  } catch (e) {
+    showError("Failed to load game moves: " + e.message);
+    return;
+  }
   replay = { moves: data.moves, idx: 0, timer: null, result: data.result };
   renderReplay();
 }
@@ -66,7 +139,7 @@ async function loadReplay(runId, name) {
 // Minimal UCI mover over a chessground-style piece map keyed by square.
 function startMap() {
   const map = new Map();
-  const back = ["r","n","b","q","k","b","n","r"];
+  const back = ["r", "n", "b", "q", "k", "b", "n", "r"];
   for (let f = 0; f < 8; f++) {
     map.set(sq(f, 0), { role: roleOf(back[f]), color: "white" });
     map.set(sq(f, 1), { role: "pawn", color: "white" });
@@ -84,11 +157,9 @@ function applyUci(map, uci) {
   const piece = map.get(from);
   if (!piece) return;
   map.delete(from);
-  // en-passant: pawn moves diagonally to an empty square -> capture passed pawn
   if (piece.role === "pawn" && from[0] !== to[0] && !map.get(to)) {
     map.delete(to[0] + from[1]);
   }
-  // castling: king two squares -> move the rook too
   if (piece.role === "king" && Math.abs(from.charCodeAt(0) - to.charCodeAt(0)) === 2) {
     const rank = from[1];
     if (to[0] === "g") { map.set("f" + rank, map.get("h" + rank)); map.delete("h" + rank); }
@@ -103,13 +174,13 @@ function mapToCg(map) {
 }
 
 function renderReplay() {
+  if (!board) return;
   const map = startMap();
   for (let i = 0; i < replay.idx; i++) applyUci(map, replay.moves[i]);
   const last = replay.idx > 0 ? lastMovePair(replay.moves[replay.idx - 1]) : undefined;
   board.set({ fen: undefined, lastMove: last });
   board.setPieces(mapToCg(map));
-  document.getElementById("rp-status").textContent =
-    `${replay.idx}/${replay.moves.length}  ${replay.result || ""}`;
+  setStatus("rp-status", `${replay.idx}/${replay.moves.length}  ${replay.result || ""}`);
 }
 
 function wireReplayControls() {
@@ -118,12 +189,20 @@ function wireReplayControls() {
   document.getElementById("rp-play").onclick = togglePlay;
 }
 function togglePlay() {
+  const btn = document.getElementById("rp-play");
   if (replay.timer) { stopPlay(); return; }
+  if (!replay.moves.length) return;
+  if (replay.idx >= replay.moves.length) { replay.idx = 0; renderReplay(); }
+  btn.textContent = "⏸ pause";
   replay.timer = setInterval(() => {
     if (replay.idx >= replay.moves.length) { stopPlay(); return; }
     replay.idx++; renderReplay();
   }, 600);
 }
-function stopPlay() { if (replay.timer) { clearInterval(replay.timer); replay.timer = null; } }
+function stopPlay() {
+  if (replay.timer) { clearInterval(replay.timer); replay.timer = null; }
+  const btn = document.getElementById("rp-play");
+  if (btn) btn.textContent = "▶ play";
+}
 
 init();

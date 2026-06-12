@@ -4,14 +4,15 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>chessrl — dashboard</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
+  <link rel="stylesheet" href="/vendor/chessground.base.css" />
+  <link rel="stylesheet" href="/vendor/chessground.brown.css" />
+  <link rel="stylesheet" href="/vendor/chessground.cburnett.css" />
+  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <nav class="topnav">
+    <span class="brand">♞ chessrl</span>
     <a href="/index.html" class="active">Dashboard</a>
     <a href="/live.html">Live</a>
     <a href="/play.html">Play</a>
@@ -31,16 +32,16 @@
       <div id="replay">
         <div id="replay-board" class="board-md"></div>
         <div class="controls">
-          <button id="rp-prev">&#9664;</button>
+          <button id="rp-prev">&#9664; prev</button>
           <button id="rp-play">&#9654; play</button>
-          <button id="rp-next">&#9654;&#9654;</button>
-          <span id="rp-status"></span>
+          <button id="rp-next">next &#9654;&#9654;</button>
+          <span id="rp-status" class="hint"></span>
         </div>
       </div>
     </section>
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/chessground@9/dist/chessground.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <!-- uPlot ships an IIFE build exposing window.uPlot. -->
+  <script src="/vendor/uPlot.iife.min.js"></script>
   <script type="module" src="/dashboard.js"></script>
 </body>
 </html>

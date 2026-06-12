@@ -21,7 +21,7 @@ class _Game:
 
     __slots__ = (
         "tree", "builder", "board", "allow_resign", "resign_streak",
-        "ply", "done", "z", "resigned", "would_resign",
+        "ply", "done", "z", "resigned", "would_resign_side",
     )
 
     def __init__(self, tree, board: chess.Board, allow_resign: bool):
@@ -34,7 +34,7 @@ class _Game:
         self.done = False
         self.z = 0
         self.resigned = False
-        self.would_resign = False
+        self.would_resign_side = None   # chess.Color of side that would resign, or None
 
 
 def play_games_concurrent(
@@ -79,7 +79,7 @@ def play_games_concurrent(
             "z": g.z,
             "resigned": g.resigned,
             "playout": not g.allow_resign,
-            "would_resign": g.would_resign,
+            "would_resign": g.would_resign_side is not None,
             "fp": _is_false_positive(g),
         }
         results.append((rec, g.board, g.z, meta))
@@ -115,7 +115,8 @@ def _play_one_move(
     if root_q < sp_cfg.resign_threshold:
         g.resign_streak[g.board.turn] += 1
         if g.resign_streak[g.board.turn] >= sp_cfg.resign_consecutive:
-            g.would_resign = True
+            if g.would_resign_side is None:
+                g.would_resign_side = g.board.turn
             if g.allow_resign:
                 g.z = -1 if g.board.turn == chess.WHITE else 1
                 g.resigned = True
@@ -142,9 +143,13 @@ def _is_false_positive(g: _Game) -> bool:
     abandons the game as a loss for the side to move, a false positive is a
     playout game that hit the criterion yet ended in a draw or a win for the
     would-be resigner."""
-    if g.allow_resign or not g.would_resign:
+    if g.allow_resign or g.would_resign_side is None:
         return False
-    # Resignation in this engine only ever fires for the side to move; in the
-    # WhiteIsLost evaluator that is White. A draw (z==0) or a White win (z==1)
-    # both contradict the would-be resignation, i.e. a false positive.
-    return g.z >= 0
+    # z is always from White's perspective.
+    # A false positive is: the would-be resigner did NOT actually lose.
+    # White would-resigner: fp when z >= 0 (draw or White win -> White didn't lose).
+    # Black would-resigner: fp when z <= 0 (draw or Black win -> Black didn't lose).
+    if g.would_resign_side == chess.WHITE:
+        return g.z >= 0
+    else:
+        return g.z <= 0

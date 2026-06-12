@@ -282,3 +282,65 @@ def test_arena(server, browser):
         status = page.inner_text("#arena-status")
         assert "game over" in status, f"arena did not finish: {status!r}"
         _assert_no_console_errors(errors)
+
+
+# --------------------------------------------------------------------------- #
+# Compare
+# --------------------------------------------------------------------------- #
+def test_compare(server, browser):
+    """Compare page: summary table, Elo chart, x-axis switching, checkbox toggle.
+
+    The real run (baseline-20260612-001337) has provenance.json WITHOUT the
+    network key — the page must handle that gracefully by showing '—' rather
+    than raising an error.
+    """
+    with page_with_console(browser) as (page, errors):
+        page.set_default_timeout(30000)
+        page.goto(server + "/compare.html", wait_until="networkidle")
+
+        # Summary table has at least 1 data row (one per run).
+        page.wait_for_function(
+            "() => document.querySelectorAll('#summary-body tr').length >= 1"
+            " && !document.querySelector('#summary-body td[colspan]')",
+            timeout=20000,
+        )
+        rows = page.query_selector_all("#summary-body tr")
+        assert len(rows) >= 1, "summary table has no run rows"
+
+        # Elo chart canvas must be present.
+        page.wait_for_selector("#elo-chart canvas", timeout=15000)
+        assert page.query_selector("#elo-chart canvas") is not None, \
+            "Elo chart canvas not found"
+
+        # Switch x-axis to "hours" — chart should re-render without errors.
+        page.click("input[name='xaxis'][value='hours']")
+        # Give the chart a moment to re-render.
+        page.wait_for_timeout(500)
+        # Canvas must still be present after the switch.
+        assert page.query_selector("#elo-chart canvas") is not None, \
+            "Elo chart canvas missing after x-axis switch to hours"
+
+        # Switch x-axis to "games".
+        page.click("input[name='xaxis'][value='games']")
+        page.wait_for_timeout(300)
+
+        # Switch back to steps.
+        page.click("input[name='xaxis'][value='steps']")
+        page.wait_for_timeout(300)
+
+        # Uncheck the first run checkbox — chart should redraw without errors.
+        first_cb = page.query_selector("#summary-body input[type='checkbox']")
+        if first_cb:
+            first_cb.uncheck()
+            page.wait_for_timeout(500)
+            # Chart may show "No data." or a canvas with remaining runs.
+            # Either way, no errors and the elo-chart div is still there.
+            assert page.query_selector("#elo-chart") is not None, \
+                "Elo chart container missing after unchecking run"
+
+            # Re-check it for a clean state.
+            first_cb.check()
+            page.wait_for_timeout(300)
+
+        # No console or page errors throughout.
+        _assert_no_console_errors(errors)

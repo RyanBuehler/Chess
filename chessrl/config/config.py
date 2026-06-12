@@ -22,6 +22,7 @@ class MCTSConfig:
     dirichlet_eps: float = 0.25
     fpu_reduction: float = 0.3
     temperature_moves: int = 30   # sample proportionally to visits for this many plies, then argmax
+    leaves_per_tree: int = 1      # M5: K leaves selected per tree per batching round (virtual loss). K=1 == reference.
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,8 @@ class SelfPlayConfig:
     resign_consecutive: int = 2          # consecutive own moves below threshold before resigning
     resign_playout_fraction: float = 0.1 # fraction of games where resignation is disabled (false-positive measurement)
     games_per_iteration: int = 10
+    workers: int = 4                     # M5: number of self-play worker processes
+    concurrent_games: int = 32           # M5: concurrent game trees per worker batch
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,10 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     buffer_size: int = 500_000
     samples_per_position: float = 2.0    # pacing: total SGD samples allowed per generated position
-    device: str = "cuda"                 # falls back to cpu if cuda unavailable
+    device: str = "cuda"                 # trainer device; falls back to cpu if cuda unavailable
     seed: int = 0
+    checkpoint_every_steps: int = 1000   # M5: trainer saves a checkpoint each time this many steps are crossed
+    selfplay_device: str = "cuda"        # M5: device workers use; falls back to cpu in worker if unavailable
 
 
 @dataclass(frozen=True)

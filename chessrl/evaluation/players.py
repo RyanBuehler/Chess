@@ -170,9 +170,18 @@ class NetMCTSPlayer:
     def play(self, board: chess.Board) -> chess.Move:
         from chessrl.chess_env.moves import index_to_move
 
-        visits, _root_q = self._mcts.search(board, add_noise=False)
+        visits, root_q = self._mcts.search(board, add_noise=False)
         best_idx = max(visits, key=visits.get)
-        return index_to_move(best_idx, board.turn == chess.BLACK, board)
+        # M7: stash top-5 (uci, visit_frac) + root_q for the Play view's eval bar
+        # and agent "thoughts". Harmless to evaluation (read only by the server).
+        flip = board.turn == chess.BLACK
+        total = float(sum(visits.values())) or 1.0
+        top = sorted(visits.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        self._last_thoughts = [
+            [index_to_move(idx, flip, board).uci(), c / total] for idx, c in top
+        ]
+        self._last_root_q = float(root_q)
+        return index_to_move(best_idx, flip, board)
 
 
 class StockfishError(RuntimeError):

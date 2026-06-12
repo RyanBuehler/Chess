@@ -13,11 +13,10 @@ import torch
 
 from chessrl.config.config import RunConfig
 from chessrl.model.network import NetEvaluator, PolicyValueNet
+from chessrl.selfplay.pgn_io import save_pgn
 from chessrl.selfplay.play import play_game
 from chessrl.training.buffer import ReplayBuffer
 from chessrl.training.trainer import Trainer
-
-_RESULT_STR = {1: "1-0", -1: "0-1", 0: "1/2-1/2"}
 
 
 def _provenance() -> dict:
@@ -34,12 +33,6 @@ def _provenance() -> dict:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
     }
-
-
-def _save_pgn(board, z, path: Path) -> None:
-    game = chess.pgn.Game.from_board(board)
-    game.headers["Result"] = _RESULT_STR[z]
-    path.write_text(str(game))
 
 
 def main(argv=None) -> Path:
@@ -85,7 +78,7 @@ def main(argv=None) -> Path:
             rec, final_board, z = play_game(evaluator, cfg.mcts, cfg.selfplay, rng)
             buffer.add_game(rec)
             rec.save(run_dir / "games" / f"game_{game_no:07d}.npz")
-            _save_pgn(final_board, z, run_dir / "games" / f"game_{game_no:07d}.pgn")
+            save_pgn(final_board, z, run_dir / "games" / f"game_{game_no:07d}.pgn")
             total_positions += len(rec)
             game_no += 1
         metrics = {"iteration": it, "games": game_no, "positions": total_positions}

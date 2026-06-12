@@ -21,3 +21,7 @@ include = ["chessrl*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: end-to-end / multiprocessing tests excluded from the default run (use -m slow to run them)",
+]

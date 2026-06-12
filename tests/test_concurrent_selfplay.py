@@ -10,6 +10,13 @@ class WhiteIsLostBatchedEvaluator(UniformBatchedEvaluator):
     """White-to-move positions evaluate as lost, Black's as won (mirrors
     tests.test_selfplay.WhiteIsLostEvaluator but batched)."""
 
+    def evaluate_planes(self, planes_batch):
+        # Plane 12: 1.0 when White to move, 0.0 when Black to move.
+        policies, _ = super().evaluate_planes(planes_batch)
+        white_to_move = planes_batch[:, 12, 0, 0] > 0.5
+        values = np.where(white_to_move, -1.0, 1.0).astype(np.float32)
+        return policies, values
+
     def evaluate_many(self, boards):
         policies, values = super().evaluate_many(boards)
         values = np.array(
@@ -24,6 +31,13 @@ class BlackIsLostBatchedEvaluator(UniformBatchedEvaluator):
     losing), so Black's resign streak fires. When it is White's turn the
     evaluator returns +1.0 (White thinks it is winning).  This mirrors
     WhiteIsLostBatchedEvaluator but with the colours swapped."""
+
+    def evaluate_planes(self, planes_batch):
+        # Plane 12: 1.0 when White to move, 0.0 when Black to move.
+        policies, _ = super().evaluate_planes(planes_batch)
+        white_to_move = planes_batch[:, 12, 0, 0] > 0.5
+        values = np.where(white_to_move, 1.0, -1.0).astype(np.float32)
+        return policies, values
 
     def evaluate_many(self, boards):
         policies, values = super().evaluate_many(boards)

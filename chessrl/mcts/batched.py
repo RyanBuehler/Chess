@@ -19,6 +19,7 @@ perspective of the side to move at that node; a parent reads child quality as
 import chess
 import numpy as np
 
+from chessrl.chess_env.encoding import encode_board, to_model_input
 from chessrl.chess_env.game import terminal_value
 from chessrl.chess_env.moves import index_to_move, move_to_index
 from chessrl.config.config import MCTSConfig
@@ -63,9 +64,15 @@ class BatchedMCTS:
     def step_round(self, trees: list) -> None:
         """Advance every not-yet-finished tree by one batching round. All
         non-terminal leaves selected this round (across all trees) are evaluated
-        in a single evaluate_many call."""
+        in a single evaluate_planes call."""
         k = self.cfg.leaves_per_tree
-        parked = []   # (tree, path, board_at_leaf) awaiting GPU evaluation
+        # parked entries: (tree, path, planes_float32, legal_idxs)
+        # planes and legal_idxs are computed at park time, before popping, so
+        # no Board.copy() is needed.
+        parked = []
+        # dirty_nodes: accumulate every node touched by virtual loss so we can
+        # zero exactly those nodes after all backups (no full-tree DFS needed).
+        dirty_nodes = []
         for tree in trees:
             if tree.root.visit_count >= self.cfg.simulations + 1:
                 continue
@@ -73,24 +80,34 @@ class BatchedMCTS:
                 if tree.root.visit_count >= self.cfg.simulations + 1:
                     break
                 path = self._select_leaf(tree)
-                leaf = path[-1]
                 self._apply_virtual_loss(path)
+                dirty_nodes.extend(path)
                 tree.sims_done += 1
                 term = terminal_value(tree.board)
                 if term is not None:
                     self._backup(path, term)
                     self._pop_to_root(tree, path)
                 else:
-                    leaf_board = tree.board.copy()
+                    # Encode board and collect legal indices HERE, while the
+                    # working board is at the leaf — avoids Board.copy().
+                    flip = tree.board.turn == chess.BLACK
+                    legal_idxs = [move_to_index(m, flip) for m in tree.board.legal_moves]
+                    planes = to_model_input(encode_board(tree.board))
                     self._pop_to_root(tree, path)
-                    parked.append((tree, path, leaf_board))
+                    parked.append((tree, path, planes, legal_idxs))
         if parked:
-            policies, values = self.evaluator.evaluate_many([p[2] for p in parked])
-            for (tree, path, leaf_board), policy, value in zip(parked, policies, values):
-                self._expand(path[-1], leaf_board, policy, float(value), is_terminal=False)
+            planes_batch = np.stack([p[2] for p in parked])
+            policies, values = self.evaluator.evaluate_planes(planes_batch)
+            for (tree, path, _planes, legal_idxs), policy, value in zip(parked, policies, values):
+                self._expand_from_idxs(path[-1], legal_idxs, policy, float(value))
                 self._backup(path, float(value))
-        for tree in trees:
-            self._clear_virtual_loss(tree.root)
+        # Clear virtual loss on exactly the nodes that were dirtied this round.
+        # _backup already decremented vloss for backed-up paths; this handles
+        # any remaining residual (safety net, mirrors the old DFS behaviour but
+        # without traversing the whole tree).
+        for n in dirty_nodes:
+            if n.vloss:
+                n.vloss = 0
 
     def visit_counts(self, tree: SearchTree) -> dict:
         return {i: c.visit_count for i, c in tree.root.children.items() if c.visit_count > 0}
@@ -172,16 +189,6 @@ class BatchedMCTS:
             n.value_sum += v
             v = -v
 
-    def _clear_virtual_loss(self, node: Node) -> None:
-        # safety net: after a completed round every vloss should already be 0
-        # (each applied loss is removed in _backup). This re-zeroes defensively.
-        stack = [node]
-        while stack:
-            n = stack.pop()
-            if n.vloss:
-                n.vloss = 0
-            stack.extend(n.children.values())
-
     def _pop_to_root(self, tree: SearchTree, path: list) -> None:
         for _ in range(len(path) - 1):
             tree.board.pop()
@@ -193,6 +200,10 @@ class BatchedMCTS:
     def _expand(self, node: Node, board: chess.Board, policy, value: float, is_terminal: bool) -> None:
         flip = board.turn == chess.BLACK
         idxs = [move_to_index(m, flip) for m in board.legal_moves]
+        self._expand_from_idxs(node, idxs, policy, value)
+
+    def _expand_from_idxs(self, node: Node, idxs: list, policy, value: float) -> None:
+        """Expand node using pre-computed legal move indices and a policy vector."""
         if not idxs:
             return
         priors = np.asarray([policy[i] for i in idxs], dtype=np.float64)

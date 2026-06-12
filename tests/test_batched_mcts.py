@@ -13,6 +13,13 @@ class UniformBatchedEvaluator:
     value 0 for every board. Search quality comes entirely from terminal
     values, exactly as the reference UniformEvaluator."""
 
+    def evaluate_planes(self, planes_batch):
+        """Accept pre-encoded planes (N, NUM_PLANES, 8, 8); return uniform results."""
+        n = planes_batch.shape[0]
+        policies = np.full((n, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32)
+        values = np.zeros(n, dtype=np.float32)
+        return policies, values
+
     def evaluate_many(self, boards):
         n = len(boards)
         policies = np.full((n, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32)

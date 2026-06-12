@@ -90,18 +90,30 @@ class BatchedNetEvaluator:
         return cls(net, device=device)
 
     @torch.no_grad()
-    def evaluate_many(self, boards: list) -> tuple[np.ndarray, np.ndarray]:
-        """boards: list[chess.Board]. Returns (policies (N,4672) softmaxed
-        float32, values (N,) float32). Empty input -> empty arrays."""
-        n = len(boards)
+    def evaluate_planes(self, planes_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """planes_batch: pre-encoded float32 array of shape (N, NUM_PLANES, 8, 8).
+        Returns (policies (N, NUM_ACTIONS) softmaxed float32, values (N,) float32).
+        Empty input (N==0) -> empty arrays."""
+        n = planes_batch.shape[0]
         if n == 0:
             return (
                 np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
                 np.zeros((0,), dtype=np.float32),
             )
-        stacked = np.stack([to_model_input(encode_board(b)) for b in boards])
-        x = torch.from_numpy(stacked).to(self.device)
+        x = torch.from_numpy(planes_batch).to(self.device)
         logits, value = self.net(x)
         policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
         values = value.squeeze(1).cpu().numpy().astype(np.float32)
         return policies, values
+
+    @torch.no_grad()
+    def evaluate_many(self, boards: list) -> tuple[np.ndarray, np.ndarray]:
+        """boards: list[chess.Board]. Returns (policies (N,4672) softmaxed
+        float32, values (N,) float32). Empty input -> empty arrays."""
+        if not boards:
+            return (
+                np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+            )
+        planes_batch = np.stack([to_model_input(encode_board(b)) for b in boards])
+        return self.evaluate_planes(planes_batch)

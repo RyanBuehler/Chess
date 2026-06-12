@@ -147,3 +147,24 @@ input[type="range"] { accent-color: var(--accent); }
 #replay { display: inline-block; }
 .uci-row { margin-top: .5rem; }
 .uci-row input { width: 7rem; }
+
+/* Compare page. */
+.compare-chart { width: 100%; max-width: 900px; margin: .25rem 0 .5rem; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.compare-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  padding: .4rem .7rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.compare-table td {
+  padding: .4rem .7rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.compare-table tr:last-child td { border-bottom: none; }
+.compare-table tr:hover td { background: #ffffff08; }
+.compare-table .mono { font-family: var(--mono); }
+#compare-section { grid-column: 1 / -1; }

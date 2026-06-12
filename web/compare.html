@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chessrl — compare</title>
+  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">♞ chessrl</span>
+    <a href="/index.html">Dashboard</a>
+    <a href="/live.html">Live</a>
+    <a href="/play.html">Play</a>
+    <a href="/arena.html">Arena</a>
+    <a href="/compare.html" class="active">Compare</a>
+  </nav>
+
+  <main style="grid-template-columns: 1fr; max-width: 1400px;">
+    <section id="compare-section">
+      <h2>Architecture Compare</h2>
+
+      <!-- X-axis selector for Elo chart -->
+      <div class="controls" style="margin-bottom: 1rem;">
+        <span style="color: var(--muted); font-size: .9rem;">Elo x-axis:</span>
+        <label><input type="radio" name="xaxis" value="steps" checked /> Steps</label>
+        <label><input type="radio" name="xaxis" value="games" /> Games</label>
+        <label><input type="radio" name="xaxis" value="hours" /> Hours (relative)</label>
+      </div>
+
+      <!-- Summary table -->
+      <div class="card" style="margin-bottom: 1rem; overflow-x: auto;">
+        <h3>Run Summary</h3>
+        <table id="summary-table" class="compare-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Run</th>
+              <th>Archetype</th>
+              <th>Params</th>
+              <th>Games</th>
+              <th>Steps</th>
+              <th>Peak Elo</th>
+              <th>Latest Elo</th>
+            </tr>
+          </thead>
+          <tbody id="summary-body">
+            <tr><td colspan="8" class="hint" style="text-align:center;padding:1rem;">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Charts -->
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3>Elo over time</h3>
+        <div id="elo-chart" class="chart compare-chart"></div>
+      </div>
+
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3>Policy loss vs steps</h3>
+        <div id="loss-chart" class="chart compare-chart"></div>
+      </div>
+
+      <div class="card" style="margin-bottom: 1rem;">
+        <h3>Games / hour vs hours (relative)</h3>
+        <div id="gph-chart" class="chart compare-chart"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/vendor/uPlot.iife.min.js"></script>
+  <script type="module" src="/compare.js"></script>
+</body>
+</html>

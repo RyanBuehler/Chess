@@ -36,12 +36,12 @@ class ReferenceMCTS:
         side to move's perspective (used for resignation)."""
         root = Node(0.0)
         value = self._expand(root, board)
-        root.visit_count += 1
+        root.visit_count += 1  # the initial expansion counts: root ends at simulations + 1
         root.value_sum += value
         if add_noise and root.children:
             self._add_dirichlet(root)
         for _ in range(self.cfg.simulations):
-            b = board.copy()
+            b = board.copy()  # full copy per simulation: intentionally simple/slow; M5 optimizes
             node, path = root, [root]
             while node.children:
                 idx, node = self._select(node)

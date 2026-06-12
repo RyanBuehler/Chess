@@ -49,8 +49,17 @@ def test_finds_mate_in_two():
 
 
 def test_dirichlet_noise_changes_priors():
+    """With uniform priors, noise is the ONLY source of asymmetry between a
+    noisy and a noise-free run at the same seed - the visit distributions
+    must differ (and still sum to the simulation count)."""
     board = chess.Board()
-    cfg = MCTSConfig(simulations=16)
-    a = ReferenceMCTS(UniformEvaluator(), cfg, rng=np.random.default_rng(1))
-    visits_noisy, _ = a.search(board, add_noise=True)
-    assert sum(visits_noisy.values()) == 16
+    cfg = MCTSConfig(simulations=64)
+    noisy, _ = ReferenceMCTS(UniformEvaluator(), cfg, rng=np.random.default_rng(1)).search(
+        board, add_noise=True
+    )
+    clean, _ = ReferenceMCTS(UniformEvaluator(), cfg, rng=np.random.default_rng(1)).search(
+        board, add_noise=False
+    )
+    assert sum(noisy.values()) == 64
+    assert sum(clean.values()) == 64
+    assert noisy != clean

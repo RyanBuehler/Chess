@@ -1,0 +1,22 @@
+/* web/style.css — minimal, no framework. */
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; color: #222; }
+.topnav { display: flex; gap: 1rem; background: #2b2b2b; padding: .6rem 1rem; }
+.topnav a { color: #ccc; text-decoration: none; }
+.topnav a.active, .topnav a:hover { color: #fff; }
+main { display: grid; grid-template-columns: 240px 1fr; gap: 1rem; padding: 1rem; }
+#charts { grid-column: 2; }
+#runs, #browser { grid-column: 1; }
+.chart { width: 100%; max-width: 480px; margin: .5rem 0; }
+ul { list-style: none; padding: 0; margin: 0; }
+#run-list li, #game-list li { padding: .25rem .4rem; cursor: pointer; border-radius: 4px; }
+#run-list li:hover, #game-list li:hover { background: #eef; }
+.board-sm { width: 180px; height: 180px; }
+.board-md { width: 320px; height: 320px; }
+.board-lg { width: 480px; height: 480px; }
+.controls { margin-top: .5rem; display: flex; gap: .5rem; align-items: center; }
+#live-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; }
+.eval-bar { width: 24px; height: 480px; background: #ddd; position: relative; }
+.eval-fill { position: absolute; bottom: 0; width: 100%; background: #4a4; }
+.thoughts li { font-family: monospace; }
+.hint { color: #888; font-style: italic; }

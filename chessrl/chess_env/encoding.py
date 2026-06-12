@@ -9,6 +9,7 @@ import numpy as np
 
 NUM_PLANES = 21
 PLANE_FIFTY = 18
+_FIFTY_CAP = 100  # halfmove clock is stored raw up to this cap, then normalized by it
 
 
 def encode_board(board: chess.Board) -> np.ndarray:
@@ -29,7 +30,7 @@ def encode_board(board: chess.Board) -> np.ndarray:
     if board.ep_square is not None:
         ep = chess.square_mirror(board.ep_square) if flip else board.ep_square
         pl[17, chess.square_rank(ep), chess.square_file(ep)] = 1
-    pl[PLANE_FIFTY] = min(board.halfmove_clock, 100)
+    pl[PLANE_FIFTY] = min(board.halfmove_clock, _FIFTY_CAP)
     pl[19] = int(board.is_repetition(2))
     pl[20] = int(board.is_repetition(3))
     return pl
@@ -38,5 +39,5 @@ def encode_board(board: chess.Board) -> np.ndarray:
 def to_model_input(planes: np.ndarray) -> np.ndarray:
     """int8 planes -> normalized float32 (works on single positions or batches)."""
     x = planes.astype(np.float32)
-    x[..., PLANE_FIFTY, :, :] /= 100.0
+    x[..., PLANE_FIFTY, :, :] /= float(_FIFTY_CAP)
     return x

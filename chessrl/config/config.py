@@ -50,12 +50,24 @@ class TrainingConfig:
 
 
 @dataclass(frozen=True)
+class EvalConfig:
+    every_n_checkpoints: int = 5         # evaluate every Nth checkpoint per run
+    games_per_rung: int = 4              # games vs each ladder rung; MUST be even (both colors equally)
+    agent_simulations: int = 200         # MCTS sims/move for the agent player in evaluation
+    max_plies: int = 256                 # ply cap; a capped game is adjudicated a draw
+    stockfish_path: str = ""             # "" disables all Stockfish rungs (floors-only ladder)
+    stockfish_movetime_ms: int = 100     # per-move think time for movetime-limited Stockfish rungs
+    poll_seconds: float = 10.0           # daemon poll interval for new checkpoints / inbox
+
+
+@dataclass(frozen=True)
 class RunConfig:
     run_name: str = "default"
     network: NetworkConfig = field(default_factory=NetworkConfig)
     mcts: MCTSConfig = field(default_factory=MCTSConfig)
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "RunConfig":
@@ -67,6 +79,7 @@ class RunConfig:
             mcts=build(MCTSConfig, "mcts"),
             selfplay=build(SelfPlayConfig, "selfplay"),
             training=build(TrainingConfig, "training"),
+            eval=build(EvalConfig, "eval"),
         )
 
     @classmethod

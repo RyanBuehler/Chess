@@ -25,7 +25,11 @@ class ReplayBuffer:
         for planes, idxs, cnts, outcome in rec.positions():
             self._data.append((planes, idxs, cnts, outcome))
 
-    def sample(self, batch_size: int, rng: np.random.Generator):
+    def sample(
+        self, batch_size: int, rng: np.random.Generator
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not self._data:
+            raise ValueError("cannot sample from an empty replay buffer")
         picks = rng.integers(0, len(self._data), size=batch_size)
         xs = np.stack([to_model_input(self._data[i][0]) for i in picks])
         ps = np.zeros((batch_size, NUM_ACTIONS), dtype=np.float32)
@@ -37,7 +41,7 @@ class ReplayBuffer:
         return xs, ps, vs
 
     @classmethod
-    def from_run_dir(cls, run_dir, capacity: int) -> "ReplayBuffer":
+    def from_run_dir(cls, run_dir: str | Path, capacity: int) -> "ReplayBuffer":
         buf = cls(capacity)
         files = sorted((Path(run_dir) / "games").glob("*.npz"))
         selected, total = [], 0

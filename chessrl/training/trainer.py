@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from chessrl.config.config import TrainingConfig
@@ -10,7 +11,7 @@ from chessrl.training.buffer import ReplayBuffer
 
 
 class Trainer:
-    def __init__(self, net, cfg: TrainingConfig, run_dir):
+    def __init__(self, net: nn.Module, cfg: TrainingConfig, run_dir: str | Path):
         self.cfg = cfg
         self.device = cfg.device if torch.cuda.is_available() else "cpu"
         self.net = net.to(self.device)
@@ -59,7 +60,7 @@ class Trainer:
         )
         return path
 
-    def load_checkpoint(self, path) -> None:
+    def load_checkpoint(self, path: str | Path) -> None:
         ck = torch.load(path, map_location=self.device)
         self.net.load_state_dict(ck["model"])
         self.opt.load_state_dict(ck["optimizer"])

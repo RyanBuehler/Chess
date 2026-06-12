@@ -1,25 +1,31 @@
 <!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>chessrl — arena</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css"/>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css"/>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css"/>
+<link rel="stylesheet" href="/vendor/chessground.base.css"/>
+<link rel="stylesheet" href="/vendor/chessground.brown.css"/>
+<link rel="stylesheet" href="/vendor/chessground.cburnett.css"/>
 <link rel="stylesheet" href="/style.css"/>
 </head><body>
-<nav class="topnav"><a href="/index.html">Dashboard</a><a href="/live.html">Live</a><a href="/play.html">Play</a><a href="/arena.html" class="active">Arena</a></nav>
+<nav class="topnav">
+  <span class="brand">♞ chessrl</span>
+  <a href="/index.html">Dashboard</a><a href="/live.html">Live</a><a href="/play.html">Play</a><a href="/arena.html" class="active">Arena</a>
+</nav>
 <main style="grid-template-columns:auto 1fr;">
-  <div>
+  <section>
     <div class="controls">
       <label>White <select id="white-kind"></select></label>
       <select id="white-ckpt" class="ckpt-pick" hidden></select>
+      <span id="white-sf" hidden><label>Elo <input id="white-sf-elo" type="number" value="1320" min="320" style="width:5rem"/></label></span>
     </div>
     <div class="controls">
       <label>Black <select id="black-kind"></select></label>
       <select id="black-ckpt" class="ckpt-pick" hidden></select>
+      <span id="black-sf" hidden><label>Elo <input id="black-sf-elo" type="number" value="1320" min="320" style="width:5rem"/></label></span>
     </div>
     <div class="controls">
       <label>delay <input id="delay" type="range" min="0" max="2000" value="500"/></label>
       <span id="delay-val">500ms</span>
+      <label>max plies <input id="max-plies" type="number" value="200" min="2" style="width:5rem"/></label>
     </div>
     <div class="controls">
       <button id="start">Start</button>
@@ -30,8 +36,8 @@
     </div>
     <div id="arena-board" class="board-lg"></div>
     <div id="arena-status" class="hint"></div>
-  </div>
+    <small class="hint">Stockfish players require the server to be started with --stockfish &lt;path&gt;; otherwise the server reports it cleanly.</small>
+  </section>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/chessground@9/dist/chessground.min.js"></script>
 <script type="module" src="/arena.js"></script>
 </body></html>

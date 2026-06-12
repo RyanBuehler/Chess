@@ -99,3 +99,56 @@ def test_stockfish_nodes_rung_plays_legal():
         assert p.conditions()["nodes"] == 100
     finally:
         p.close()
+
+
+# ---- Hang-stub regression: nodes rung must not block forever ----------------
+
+def test_nodes_rung_does_not_hang(tmp_path):
+    """A nodes-only Limit must be time-bounded. This test uses a stub engine that
+    speaks just enough UCI to pass the handshake but never replies to 'go', verifying
+    that StockfishPlayer raises (rather than hanging forever) within a tight wall-clock
+    bound.
+    """
+    import sys
+    import time
+
+    # Write a minimal UCI stub: handles uci + isready, ignores everything else.
+    stub = tmp_path / "hang_stub.py"
+    stub.write_text(
+        "import sys\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if line == 'uci':\n"
+        "        print('id name HangStub', flush=True)\n"
+        "        print('uciok', flush=True)\n"
+        "    elif line == 'isready':\n"
+        "        print('readyok', flush=True)\n"
+        "    # 'go' and 'quit' are silently ignored — engine hangs forever on go\n",
+        encoding="utf-8",
+    )
+
+    timeout_s = 0.5
+    p = StockfishPlayer(
+        [sys.executable, str(stub)],
+        nodes=1,
+        timeout_s=timeout_s,
+        name="hang_stub",
+    )
+    start = time.monotonic()
+    try:
+        with pytest.raises(Exception):
+            p.play(chess.Board())
+    finally:
+        # close() may also raise if the stub ignores 'quit' — that's fine,
+        # the engine subprocess will be reaped by the OS. Suppress so the
+        # timing assertion is always reached.
+        try:
+            p.close()
+        except Exception:
+            pass
+
+    elapsed = time.monotonic() - start
+    # One play attempt times out, triggers one auto-restart (quit + popen_uci +
+    # second play), all bounded by timeout_s each. Total wall time is bounded;
+    # 10 seconds is far below "hang forever" but generous enough for slow CI.
+    assert elapsed < 10.0, f"play() took {elapsed:.1f}s — engine may have hung"

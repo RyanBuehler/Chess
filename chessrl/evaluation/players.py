@@ -191,7 +191,7 @@ class StockfishPlayer:
 
     def __init__(
         self,
-        path: str,
+        path: "str | list[str]",
         *,
         elo: int | None = None,
         nodes: int | None = None,
@@ -214,7 +214,9 @@ class StockfishPlayer:
         self._start()
 
     def _start(self) -> None:
-        self._engine = chess.engine.SimpleEngine.popen_uci(self._path)
+        self._engine = chess.engine.SimpleEngine.popen_uci(
+            self._path, timeout=self._timeout_s
+        )
         self._engine_id = self._engine.id.get("name", "stockfish")
         # Ponder is managed by python-chess internally and must NOT be passed to
         # configure(); setting it raises EngineError. Include only the options we
@@ -238,7 +240,11 @@ class StockfishPlayer:
 
     def _limit(self) -> chess.engine.Limit:
         if self._nodes is not None:
-            return chess.engine.Limit(nodes=self._nodes)
+            # Include time= so SimpleEngine._timeout_for() returns a finite bound
+            # (it returns None—wait forever—when limit.time is None). The time
+            # ceiling activates asyncio.wait_for; the node budget still governs
+            # normal play and the engine will stop at whichever comes first.
+            return chess.engine.Limit(nodes=self._nodes, time=self._timeout_s)
         return chess.engine.Limit(time=self._movetime_ms / 1000.0)
 
     def play(self, board: chess.Board) -> chess.Move:
@@ -249,6 +255,10 @@ class StockfishPlayer:
                     raise StockfishError("engine returned no move")
                 return result.move
             except StockfishError:
+                # Re-raise directly: StockfishError is already a terminal
+                # failure (e.g. engine returned no move after restart). Folding
+                # it into the generic handler below would trigger a second
+                # _restart() on an already-failed attempt, masking the cause.
                 raise
             except Exception:
                 if attempt == 0:

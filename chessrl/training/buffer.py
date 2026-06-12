@@ -43,7 +43,12 @@ class ReplayBuffer:
     @classmethod
     def from_run_dir(cls, run_dir: str | Path, capacity: int) -> "ReplayBuffer":
         buf = cls(capacity)
-        files = sorted((Path(run_dir) / "games").glob("*.npz"))
+        # Sort by (mtime, name) so multi-worker write chronology is respected;
+        # lexical filename order is unreliable across concurrent workers.
+        files = sorted(
+            (Path(run_dir) / "games").glob("*.npz"),
+            key=lambda p: (p.stat().st_mtime, p.name),
+        )
         selected, total = [], 0
         for f in reversed(files):           # newest first
             rec = GameRecord.load(f)

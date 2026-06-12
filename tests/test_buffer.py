@@ -31,11 +31,17 @@ def test_sample_shapes_and_targets():
     assert set(np.unique(v)).issubset({-1.0, 1.0})
 
 
-def test_reconstruct_from_run_dir(tmp_path):
+def test_reconstruct_from_run_dir_orders_by_mtime(tmp_path):
+    import os
+
     games = tmp_path / "games"
     games.mkdir()
-    rec = record_from_pgn(FOOLS_MATE)
-    rec.save(games / "game_0000000.npz")
-    rec.save(games / "game_0000001.npz")
+    rec = record_from_pgn(FOOLS_MATE)  # 4 positions each
+    # Names deliberately NOT in chronological order; mtime is the real order.
+    rec.save(games / "game_w01_0000000.npz")  # oldest (set below)
+    rec.save(games / "game_w00_0000000.npz")  # newest (set below)
+    base = 1_000_000_000
+    os.utime(games / "game_w01_0000000.npz", (base, base))           # older
+    os.utime(games / "game_w00_0000000.npz", (base + 10, base + 10)) # newer
     buf = ReplayBuffer.from_run_dir(tmp_path, capacity=6)
     assert len(buf) == 6  # newest games kept, capped at capacity

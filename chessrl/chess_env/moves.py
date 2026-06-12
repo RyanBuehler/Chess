@@ -13,6 +13,7 @@ import numpy as np
 NUM_MOVE_TYPES = 73
 NUM_ACTIONS = 64 * NUM_MOVE_TYPES
 
+# (file_delta, rank_delta), in docstring order: N NE E SE S SW W NW
 _DIRECTIONS = [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1)]
 _KNIGHT = [(1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)]
 _PROMO_PIECES = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
@@ -31,6 +32,12 @@ def _mirror(move: chess.Move) -> chess.Move:
 
 
 def move_to_index(move: chess.Move, flip: bool) -> int:
+    """Encode a move as a flat action index in the side-to-move frame.
+
+    flip=True (Black to move) mirrors the move first, so every position is
+    encoded from the mover's perspective. Queen-promotions encode as plain
+    queen moves; index_to_move restores the flag from board context.
+    """
     if flip:
         move = _mirror(move)
     df = chess.square_file(move.to_square) - chess.square_file(move.from_square)
@@ -53,7 +60,7 @@ def index_to_move(index: int, flip: bool, board: chess.Board) -> chess.Move:
     promotion = None
     if mtype >= 64:
         u = mtype - 64
-        df, dr = u // 3 - 1, 1
+        df, dr = u // 3 - 1, 1  # in the mover's frame a promotion always advances one rank
         promotion = _PROMO_PIECES[u % 3]
     elif mtype >= 56:
         df, dr = _KNIGHT[mtype - 56]
@@ -74,6 +81,8 @@ def index_to_move(index: int, flip: bool, board: chess.Board) -> chess.Move:
 
 
 def legal_move_mask(board: chess.Board) -> np.ndarray:
+    """Bool mask of shape (NUM_ACTIONS,) over the side-to-move action frame
+    (flip is derived from board.turn — callers never pass it)."""
     mask = np.zeros(NUM_ACTIONS, dtype=bool)
     flip = board.turn == chess.BLACK
     for mv in board.legal_moves:

@@ -18,13 +18,15 @@ from chessrl.goals.assignment import make_assigner
 from chessrl.goals.curriculum import Curriculum
 from chessrl.goals.repertoire import Repertoire
 from chessrl.model.network import (
+    BatchedGoalNetEvaluator,
     BatchedNetEvaluator,
-    GoalNetEvaluator,
     PolicyValueNet,
 )
-from chessrl.selfplay.concurrent import play_games_concurrent
+from chessrl.selfplay.concurrent import (
+    play_games_concurrent,
+    play_goal_games_concurrent,
+)
 from chessrl.selfplay.pgn_io import save_pgn
-from chessrl.selfplay.play import play_goal_game
 
 
 def next_counter_for_worker(run_dir, worker_id: int) -> int:
@@ -80,15 +82,16 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     workers so a cold-start run begins from the same weights everywhere.
 
     Returns a BatchedNetEvaluator for vanilla (goal_mode=none), or a
-    GoalNetEvaluator (single-position, goal-conditioned net) for goal modes."""
+    BatchedGoalNetEvaluator (batched goal-conditioned net) for goal modes — the
+    batched evaluator drives the concurrent goal self-play driver."""
     goal_mode = cfg.goal.goal_mode != "none"
     ckpt = _newest_checkpoint(run_dir)
     if goal_mode:
         if ckpt is not None:
-            return GoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
+            return BatchedGoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
         torch.manual_seed(seed)
         net = PolicyValueNet(cfg.network, goal_conditioned=True)
-        return GoalNetEvaluator(net, device=device)
+        return BatchedGoalNetEvaluator(net, device=device)
     if ckpt is not None:
         return BatchedNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
     torch.manual_seed(seed)
@@ -97,28 +100,19 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
 
 
 def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator, curriculum=None) -> list:
-    """Play one batch of goal-conditioned games sequentially. Returns
-    list[(GameRecord, final_board, z, meta)] in the same shape as
-    play_games_concurrent. Meta adds goal diagnostics: win_ply_fraction (the
-    per-game control variable, spec sec 7/16). ``curriculum`` (lp mode) is the
-    LP sampler built from the reloaded repertoire snapshot."""
+    """Play one batch of goal-conditioned games CONCURRENTLY, batching leaf
+    evaluations across all in-flight games/sides into one BatchedGoalNetEvaluator
+    call per search round (spec sec 7/10). Returns list[(GameRecord, final_board,
+    z, meta)] in the same shape as play_games_concurrent. Meta adds goal
+    diagnostics: win_ply_fraction (the per-game control variable, spec sec 7/16).
+    ``curriculum`` (lp mode) is the LP sampler built from the reloaded repertoire
+    snapshot. Each game reproduces play_goal_game's semantics exactly."""
     assigner = make_assigner(cfg.goal, rng, curriculum=curriculum)
-    results = []
-    for _ in range(cfg.selfplay.concurrent_games):
-        rec, board, z = play_goal_game(
-            evaluator, cfg.mcts, cfg.selfplay, cfg.goal, rng, assigner
-        )
-        meta = {
-            "plies": len(rec),
-            "z": z,
-            "resigned": False,
-            "playout": False,
-            "would_resign": False,
-            "fp": False,
-            "win_ply_fraction": rec.win_ply_fraction(),
-        }
-        results.append((rec, board, z, meta))
-    return results
+    return play_goal_games_concurrent(
+        evaluator, cfg.mcts, cfg.selfplay, cfg.goal, rng,
+        num_games=cfg.selfplay.concurrent_games,
+        assigner=assigner,
+    )
 
 
 def run_one_batch(
@@ -186,7 +180,7 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
             if newest is not None and newest != loaded_ckpt:
                 try:
                     if cfg.goal.goal_mode != "none":
-                        evaluator = GoalNetEvaluator.from_checkpoint(
+                        evaluator = BatchedGoalNetEvaluator.from_checkpoint(
                             newest, cfg.network, device=resolved_device
                         )
                     else:

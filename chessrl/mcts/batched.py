@@ -50,15 +50,27 @@ class SearchTree:
     position between rounds), and how many simulations have been credited.
 
     In goal-conditioned mode ``baseline`` holds the BoardFeatures at the search
-    root (for count-delta goal terminals); it is None in vanilla mode."""
+    root (for count-delta goal terminals); it is None in vanilla mode.
 
-    __slots__ = ("root", "board", "sims_done", "baseline")
+    ``goal``/``protagonist`` are the PER-TREE goal context. They are None for the
+    single-goal modes (vanilla, or a goal ``BatchedMCTS`` built with a fixed
+    goal/protagonist on the instance), in which case the instance-level
+    ``self.goal``/``self.protagonist`` apply unchanged — so the validated K=1
+    equivalence path is byte-for-byte identical. They are set only by the
+    goal-aware CONCURRENT driver, which batches heterogeneous goals/protagonists
+    across many in-flight games into one shared evaluator call: each tree carries
+    its own goal, protagonist, and baseline, so a leaf encodes its OWN goal planes
+    + deadline and the per-game minimax/terminal algebra uses its OWN context."""
 
-    def __init__(self, board: chess.Board, baseline=None):
+    __slots__ = ("root", "board", "sims_done", "baseline", "goal", "protagonist")
+
+    def __init__(self, board: chess.Board, baseline=None, goal=None, protagonist=None):
         self.root = Node(0.0)
         self.board = board
         self.sims_done = 0
         self.baseline = baseline
+        self.goal = goal
+        self.protagonist = protagonist
 
 
 class BatchedMCTS:
@@ -69,17 +81,34 @@ class BatchedMCTS:
         rng: np.random.Generator | None = None,
         goal=None,
         protagonist: bool | None = None,
+        goal_mode: bool | None = None,
     ):
         self.evaluator = evaluator_many
         self.cfg = cfg
         self.rng = rng if rng is not None else np.random.default_rng()
         # Goal-conditioned mode: protagonist-frame minimax + goal terminals,
         # threaded through the leaf-parking path. None -> vanilla negamax.
+        #
+        # Two ways to enter goal mode:
+        #   * fixed goal+protagonist on the INSTANCE (the original single-game /
+        #     equivalence path): goal != None, every tree uses this same context;
+        #   * goal_mode=True with goal=None (the CONCURRENT goal driver): the
+        #     instance carries NO goal; each tree carries its own goal context
+        #     (SearchTree.goal/protagonist/baseline) so heterogeneous, switching
+        #     goals batch together. Use init_tree_for_goal() to build such trees.
         self.goal = goal
         self.protagonist = protagonist
-        self.goal_mode = goal is not None
-        if self.goal_mode and protagonist is None:
+        self.goal_mode = (goal is not None) if goal_mode is None else goal_mode
+        if goal is not None and protagonist is None:
             raise ValueError("goal-conditioned BatchedMCTS requires a protagonist")
+
+    def _ctx(self, tree: "SearchTree"):
+        """(goal, protagonist) for this tree: the per-tree context if set
+        (concurrent driver), else the instance-level fixed context (equivalence
+        path). Validated K=1 path leaves tree.goal None -> returns self.goal."""
+        if tree.goal is not None:
+            return tree.goal, tree.protagonist
+        return self.goal, self.protagonist
 
     # ---- public API -----------------------------------------------------
 
@@ -89,6 +118,26 @@ class BatchedMCTS:
         tree = SearchTree(b, baseline=baseline)
         value = self._expand_leaf(tree, tree.root, plies_from_root=0)
         tree.root.visit_count += 1            # initial expansion counts as one visit (matches reference)
+        tree.root.value_sum += value
+        if add_noise and tree.root.children:
+            self._add_dirichlet(tree.root)
+        return tree
+
+    def init_tree_for_goal(
+        self, board: chess.Board, goal, protagonist: bool, add_noise: bool = False
+    ) -> SearchTree:
+        """Build a goal-mode tree carrying its OWN goal/protagonist/baseline (the
+        concurrent goal driver path). The instance must be in goal mode but need
+        not have a fixed goal. The baseline is the count-delta origin captured at
+        THIS search root, exactly as GoalReferenceMCTS recomputes per search."""
+        if not self.goal_mode:
+            raise ValueError("init_tree_for_goal requires a goal-mode BatchedMCTS")
+        b = board.copy()
+        tree = SearchTree(
+            b, baseline=board_features(b), goal=goal, protagonist=protagonist
+        )
+        value = self._expand_leaf(tree, tree.root, plies_from_root=0)
+        tree.root.visit_count += 1
         tree.root.value_sum += value
         if add_noise and tree.root.children:
             self._add_dirichlet(tree.root)
@@ -133,8 +182,9 @@ class BatchedMCTS:
                     flip = tree.board.turn == chess.BLACK
                     legal_idxs = [move_to_index(m, flip) for m in tree.board.legal_moves]
                     if self.goal_mode:
-                        remaining = self.goal.deadline - plies
-                        goal_planes, _ = encode_goal(self.goal, remaining, self.protagonist)
+                        goal, protagonist = self._ctx(tree)
+                        remaining = goal.deadline - plies
+                        goal_planes, _ = encode_goal(goal, remaining, protagonist)
                         board_planes = to_model_input(encode_board(tree.board))
                         planes = np.concatenate(
                             [board_planes, goal_planes.astype(np.float32)], axis=0
@@ -202,17 +252,18 @@ class BatchedMCTS:
     def _select_leaf(self, tree: SearchTree) -> list:
         """Descend from root to an unexpanded/terminal leaf, pushing moves on
         tree.board. Returns the path (root..leaf). Caller must pop back."""
+        _, protagonist = self._ctx(tree)
         node = tree.root
         path = [node]
         while node.children:
-            idx, node = self._select(node, mover=tree.board.turn)
+            idx, node = self._select(node, mover=tree.board.turn, protagonist=protagonist)
             tree.board.push(index_to_move(idx, tree.board.turn == chess.BLACK, tree.board))
             path.append(node)
         return path
 
-    def _select(self, node: Node, mover: bool):
+    def _select(self, node: Node, mover: bool, protagonist: bool | None = None):
         if self.goal_mode:
-            return self._select_goal(node, mover)
+            return self._select_goal(node, mover, protagonist)
         # effective visits/value include virtual loss; vloss adds visits valued
         # -1 from the parent's perspective.
         eff_parent_n = node.visit_count + node.vloss
@@ -232,7 +283,7 @@ class BatchedMCTS:
                 best_idx, best_child, best_score = idx, ch, score
         return best_idx, best_child
 
-    def _select_goal(self, node: Node, mover: bool):
+    def _select_goal(self, node: Node, mover: bool, protagonist: bool | None = None):
         """Protagonist-frame minimax selection (batched analogue of
         ``GoalReferenceMCTS._select``). The parent mover's exploitation view on
         the negamax [-1,1] scale is ``q = sign*(2*p - 1)`` with sign = +1 if the
@@ -240,8 +291,14 @@ class BatchedMCTS:
         at the worst achievement probability FOR THE PARENT MOVER (p=0 when the
         mover is the protagonist, p=1 when the mover is the opponent), so vloss
         pulls q toward -1 just like the vanilla path. At K=1 (vloss==0) this is
-        bit-identical to the reference."""
-        sign = 1.0 if mover == self.protagonist else -1.0
+        bit-identical to the reference.
+
+        ``protagonist`` is the per-tree protagonist (concurrent driver); when
+        None it falls back to the instance ``self.protagonist`` (equivalence
+        path), leaving that path byte-for-byte unchanged."""
+        if protagonist is None:
+            protagonist = self.protagonist
+        sign = 1.0 if mover == protagonist else -1.0
         p_vloss = 0.0 if sign > 0 else 1.0  # worst achievement prob for this mover
 
         eff_parent_n = node.visit_count + node.vloss
@@ -292,9 +349,10 @@ class BatchedMCTS:
         deadline - plies_from_root``."""
         if not self.goal_mode:
             return terminal_value(tree.board)
-        remaining = self.goal.deadline - plies_from_root
+        goal, protagonist = self._ctx(tree)
+        remaining = goal.deadline - plies_from_root
         return goal_terminal_value(
-            tree.board, self.goal, self.protagonist, remaining, tree.baseline
+            tree.board, goal, protagonist, remaining, tree.baseline
         )
 
     def _expand_leaf(self, tree: SearchTree, node: Node, plies_from_root: int) -> float:
@@ -308,9 +366,10 @@ class BatchedMCTS:
         flip = board.turn == chess.BLACK
         idxs = [move_to_index(m, flip) for m in board.legal_moves]
         if self.goal_mode:
-            remaining = self.goal.deadline - plies_from_root
+            goal, protagonist = self._ctx(tree)
+            remaining = goal.deadline - plies_from_root
             policy, value = self.evaluator.evaluate_one_goal(
-                board, self.goal, remaining, self.protagonist
+                board, goal, remaining, protagonist
             )
         else:
             policies, values = self.evaluator.evaluate_many([board])

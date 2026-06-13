@@ -12,9 +12,11 @@ import numpy as np
 
 from chessrl.chess_env.game import terminal_value
 from chessrl.chess_env.moves import index_to_move
-from chessrl.config.config import MCTSConfig, SelfPlayConfig
+from chessrl.config.config import GoalConfig, MCTSConfig, SelfPlayConfig
+from chessrl.goals.assignment import GoalAssigner
 from chessrl.mcts.batched import BatchedMCTS
 from chessrl.selfplay.feed import NullPublisher
+from chessrl.selfplay.play import _SideGoal, _maybe_switch_to_win
 from chessrl.selfplay.records import GameRecord, RecordBuilder
 
 
@@ -190,3 +192,185 @@ def _is_false_positive(g: _Game) -> bool:
         return g.z >= 0
     else:
         return g.z <= 0
+
+
+# ===========================================================================
+# Goal-conditioned concurrent self-play (spec sec 7, 10).
+#
+# This is the batched analogue of selfplay/play.py:play_goal_game. It advances
+# ``num_games`` goal games in lockstep so that, per ply-round, the leaf
+# evaluations across ALL in-flight games are batched into ONE
+# BatchedGoalNetEvaluator.evaluate_planes call — each leaf already carries its
+# OWN goal planes + deadline (BatchedMCTS leaf-parking), so games pursuing
+# DIFFERENT, mid-game-SWITCHING goals batch together with no special-casing.
+#
+# Per-game semantics mirror play_goal_game EXACTLY:
+#   * per-side goal assignment at game start (assigner.assign() per side);
+#   * pure pursuit of the side-to-move's ACTIVE goal as protagonist;
+#   * temperature sampling before mcts_cfg.temperature_moves, argmax after;
+#   * switch-to-win on resolution (_maybe_switch_to_win, shared with play.py);
+#   * resignation ONLY while the active goal is the win-goal, on the SAME
+#     root-Q-mapped-(2p-1) threshold and consecutive-streak rule;
+#   * the SAME record fields (protagonist / assigned / active / visit counts).
+#
+# Like play_goal_game, each ply rebuilds a FRESH search root with a fresh
+# baseline and fresh Dirichlet noise (no subtree reuse): GoalReferenceMCTS
+# recomputes the count-delta baseline at every search() call, and the active
+# goal can change between plies, so a fresh per-ply tree is the exact mirror.
+# ===========================================================================
+
+
+class _GoalGame:
+    """Mutable per-game state for one slot in the concurrent GOAL batch.
+
+    Mirrors play_goal_game's locals: a board, a record builder, the two sides'
+    goal state, the verifier state snapshots, the resign streak, and the result.
+    """
+
+    __slots__ = (
+        "builder", "board", "states", "sides", "allow_resign", "resign_streak",
+        "ply", "done", "z", "tree",
+    )
+
+    def __init__(self, board: chess.Board, sides: dict, allow_resign: bool):
+        self.builder = RecordBuilder()
+        self.board = board
+        self.states = [board.copy()]
+        self.sides = sides
+        self.allow_resign = allow_resign
+        self.resign_streak = {chess.WHITE: 0, chess.BLACK: 0}
+        self.ply = 0
+        self.done = False
+        self.z = 0
+        self.tree = None        # the fresh per-ply search tree (rebuilt each round)
+
+
+def play_goal_games_concurrent(
+    evaluator_goal,
+    mcts_cfg: MCTSConfig,
+    sp_cfg: SelfPlayConfig,
+    goal_cfg: GoalConfig,
+    rng: np.random.Generator,
+    num_games: int,
+    assigner: GoalAssigner,
+) -> list:
+    """Play ``num_games`` goal-conditioned games concurrently, batching leaf
+    evaluations across all games into ``evaluator_goal`` (a
+    BatchedGoalNetEvaluator). Returns list[(GameRecord, final_board, z, meta)] in
+    slot order, the SAME shape as play_games_concurrent, with goal diagnostics in
+    meta (win_ply_fraction). Reproduces play_goal_game per game exactly."""
+    # One goal-mode MCTS with NO fixed goal; each tree carries its own context.
+    mcts = BatchedMCTS(evaluator_goal, mcts_cfg, rng, goal_mode=True)
+
+    games: list[_GoalGame] = []
+    for _ in range(num_games):
+        board = chess.Board()
+        # RNG draw order matches play_goal_game exactly (allow_resign, then the
+        # White-side goal, then the Black-side goal) so a single-game run is
+        # bit-comparable to the sequential reference under a matched seed.
+        allow_resign = rng.random() >= sp_cfg.resign_playout_fraction
+        sides = {
+            chess.WHITE: _SideGoal(assigner.assign()),
+            chess.BLACK: _SideGoal(assigner.assign()),
+        }
+        games.append(_GoalGame(board, sides, allow_resign))
+
+    # Resolve any game that is already terminal / over the cap before searching.
+    for g in games:
+        _goal_check_pre_move_termination(g, sp_cfg)
+
+    while any(not g.done for g in games):
+        active = [g for g in games if not g.done]
+        # Build a FRESH per-ply tree for every active game, each with the
+        # side-to-move's ACTIVE goal as protagonist (pure pursuit) + root noise.
+        for g in active:
+            protagonist = g.board.turn
+            side = g.sides[protagonist]
+            g.tree = mcts.init_tree_for_goal(
+                g.board, side.active, protagonist, add_noise=True
+            )
+        # Run all trees to cfg.simulations, sharing one GPU batch per round.
+        trees = [g.tree for g in active]
+        while any(t.root.visit_count < mcts_cfg.simulations + 1 for t in trees):
+            mcts.step_round(trees)
+
+        for g in active:
+            _play_one_goal_move(g, mcts, mcts_cfg, sp_cfg, rng)
+
+    results = []
+    for g in games:
+        rec = g.builder.finalize(g.z)
+        meta = {
+            "plies": len(rec),
+            "z": g.z,
+            "resigned": False,
+            "playout": not g.allow_resign,
+            "would_resign": False,
+            "fp": False,
+            "win_ply_fraction": rec.win_ply_fraction(),
+        }
+        results.append((rec, g.board, g.z, meta))
+    return results
+
+
+def _goal_check_pre_move_termination(g: _GoalGame, sp_cfg: SelfPlayConfig) -> None:
+    """Mirror of play_goal_game's loop-top termination (real result / ply cap)."""
+    term = terminal_value(g.board)
+    if term is not None:
+        g.z = int(term) if g.board.turn == chess.WHITE else -int(term)
+        g.done = True
+    elif g.ply >= sp_cfg.ply_cap:
+        g.z = 0
+        g.done = True
+
+
+def _play_one_goal_move(
+    g: _GoalGame, mcts: BatchedMCTS, mcts_cfg: MCTSConfig, sp_cfg: SelfPlayConfig,
+    rng: np.random.Generator,
+) -> None:
+    """One move for one game: pick (temperature/argmax), record with goal
+    columns, apply the win-goal-only resignation gate, push the move, then
+    re-check the mover's goal resolution. Exact mirror of play_goal_game's body."""
+    protagonist = g.board.turn
+    side = g.sides[protagonist]
+
+    visits = mcts.visit_counts(g.tree)
+    root_v = mcts.root_q(g.tree)        # protagonist-frame achievement prob at root
+    idxs = np.fromiter(visits.keys(), dtype=np.int64)
+    counts = np.fromiter(visits.values(), dtype=np.float64)
+    if g.ply < mcts_cfg.temperature_moves:
+        choice = int(rng.choice(idxs, p=counts / counts.sum()))
+    else:
+        choice = int(idxs[counts.argmax()])
+
+    g.builder.add(
+        g.board, idxs.astype(np.int32), counts.astype(np.int32), choice,
+        protagonist=protagonist,
+        assigned_goal=side.assigned,
+        active_goal=side.active,
+    )
+
+    # Resignation gate: ONLY under the win-goal (mirror of play.py; a hard
+    # sub-goal's tiny achievement prob must not resign the GAME).
+    if side.active.is_win():
+        root_q = 2.0 * root_v - 1.0
+        if root_q < sp_cfg.resign_threshold:
+            g.resign_streak[protagonist] += 1
+            if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
+                g.z = -1 if protagonist == chess.WHITE else 1
+                g.done = True
+                return
+        else:
+            g.resign_streak[protagonist] = 0
+    else:
+        g.resign_streak[protagonist] = 0
+
+    g.board.push(index_to_move(choice, protagonist == chess.BLACK, g.board))
+    g.ply += 1
+    g.states.append(g.board.copy())
+
+    # After the move lands, re-check the mover's goal resolution (achieved or
+    # deadline expired -> switch active goal to WIN for the rest of the game).
+    _maybe_switch_to_win(side, g.states, protagonist, g.ply)
+
+    _goal_check_pre_move_termination(g, sp_cfg)

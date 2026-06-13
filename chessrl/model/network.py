@@ -117,11 +117,29 @@ class NetEvaluator:
 # deadline) raw; we feed it to the FC scaled into a small range so it is on the
 # same order as the conv features. Calibration/monotonicity (Task 2.3) operates
 # on the post-net probability, not this raw scale.
+#
+# The scaled scalar is CLAMPED to [0, 1] (correctness fix): the win-goal's
+# deadline (512 = ply_cap) would otherwise scale to ~8.5 at the search/inference
+# path while HER trains on min(deadline, deadline_max)/DEADLINE_SCALE == 1.0 -- a
+# train/inference distribution mismatch on V(.|win). Clamping here, in the SINGLE
+# canonical place that forms the network input, makes every path (reference
+# search, batched search, GoalNetEvaluator, BatchedGoalNetEvaluator, and the HER
+# train path which caps remaining at deadline_max == DEADLINE_SCALE) feed the
+# SAME bounded scalar for a given (goal, state). Sub-goals (deadline <=
+# deadline_max) are unaffected since their scaled scalar is already <= 1.0.
 DEADLINE_SCALE = 60.0
 
 
+def _scale_deadlines(remainings, scale: float = DEADLINE_SCALE) -> np.ndarray:
+    """Canonical deadline-scalar transform: scale by DEADLINE_SCALE then clamp to
+    [0, 1]. Accepts a scalar or array-like; returns a float32 ndarray."""
+    arr = np.asarray(remainings, dtype=np.float32) / scale
+    return np.clip(arr, 0.0, 1.0)
+
+
 def _deadline_tensor(remaining, device, scale: float = DEADLINE_SCALE):
-    return torch.tensor([[float(remaining) / scale]], dtype=torch.float32, device=device)
+    scaled = float(_scale_deadlines(remaining, scale))
+    return torch.tensor([[scaled]], dtype=torch.float32, device=device)
 
 
 class GoalNetEvaluator:
@@ -270,6 +288,12 @@ class BatchedGoalNetEvaluator:
         self.net = net.to(device)
         self.net.eval()
 
+    @staticmethod
+    def _scale_deadlines(deadlines: np.ndarray) -> np.ndarray:
+        """Batched analogue of ``_deadline_tensor``: the SAME scale-then-clamp
+        transform, so the batched path feeds an identical bounded scalar."""
+        return _scale_deadlines(deadlines)
+
     @classmethod
     def from_checkpoint(
         cls, path, network_cfg: NetworkConfig, device: str = "cpu"
@@ -295,7 +319,7 @@ class BatchedGoalNetEvaluator:
             )
         x = torch.from_numpy(planes_batch).to(self.device)
         deadline = torch.tensor(
-            np.asarray(deadlines, dtype=np.float32).reshape(-1, 1) / DEADLINE_SCALE,
+            self._scale_deadlines(deadlines).reshape(-1, 1),
             dtype=torch.float32,
             device=self.device,
         )

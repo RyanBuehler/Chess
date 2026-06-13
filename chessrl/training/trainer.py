@@ -60,14 +60,16 @@ class Trainer:
         the rows that carry a policy target (HER future/negative rows do not).
         The deadline scalar is scaled to match the evaluators' DEADLINE_SCALE.
         """
-        from chessrl.model.network import DEADLINE_SCALE
+        from chessrl.model.network import _scale_deadlines
 
         self.net.train()
         lp_sum = lv_sum = 0.0
         for _ in range(n):
             x, deadline, p, p_mask, v, vw = buffer.sample(self.cfg.batch_size, rng)
             xt = torch.from_numpy(x).to(self.device)
-            dt = torch.from_numpy(deadline / DEADLINE_SCALE).to(self.device)
+            # Canonical scale-then-clamp to [0,1] so the train-time scalar matches
+            # the evaluators' bounded input exactly (deadline-consistency fix).
+            dt = torch.from_numpy(_scale_deadlines(deadline)).to(self.device)
             pt = torch.from_numpy(p).to(self.device)
             pmask = torch.from_numpy(p_mask).to(self.device)
             vt = torch.from_numpy(v).to(self.device)

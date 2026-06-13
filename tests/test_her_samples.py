@@ -2,6 +2,7 @@
 (plan Task 3.3) and the wishful-thinking thermometer metrics (plan Task 3.4)."""
 import chess
 import numpy as np
+import pytest
 import torch
 
 from chessrl.chess_env.moves import NUM_ACTIONS, move_to_index
@@ -186,3 +187,21 @@ def test_trainer_goal_step_uses_bce_and_masked_ce(tmp_path):
     with torch.no_grad():
         _, val = net(torch.from_numpy(x), torch.from_numpy(deadline / DEADLINE_SCALE))
     assert float(val.min()) >= 0.0 and float(val.max()) <= 1.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for autocast path")
+def test_trainer_goal_step_runs_under_cuda_autocast(tmp_path):
+    """Regression: the goal trainer runs under CUDA autocast in production, and
+    F.binary_cross_entropy is autocast-UNSAFE -- it must be computed in fp32 with
+    autocast disabled or the very first training step raises RuntimeError. CPU
+    tests cannot catch this (autocast is CUDA-only)."""
+    rec, _ = _capture_queen_game()
+    buf = GoalReplayBuffer(capacity=10_000)
+    buf.add_game(rec, np.random.default_rng(0))
+
+    torch.manual_seed(0)
+    net = PolicyValueNet(NetworkConfig(blocks=1, filters=16), goal_conditioned=True)
+    trainer = Trainer(net, TrainingConfig(batch_size=8, device="cuda"), tmp_path)
+    m = trainer.train_steps_goal(buf, 2, np.random.default_rng(0))  # must not raise
+    assert trainer.step == 2
+    assert np.isfinite(m["policy_loss"]) and np.isfinite(m["value_loss"])

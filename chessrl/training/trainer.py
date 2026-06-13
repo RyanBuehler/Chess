@@ -80,11 +80,16 @@ class Trainer:
                 ce = -(pt * F.log_softmax(logits, dim=1)).sum(dim=1)
                 denom = pmask.sum().clamp_min(1.0)
                 loss_p = (ce * pmask).sum() / denom
-                # Weighted BCE value loss (sigmoid achievement probability).
-                val = value.squeeze(1).clamp(1e-6, 1.0 - 1e-6)
-                bce = F.binary_cross_entropy(val, vt, reduction="none")
-                loss_v = (bce * vwt).sum() / vwt.sum().clamp_min(1e-6)
-                loss = loss_p + loss_v
+            # Weighted BCE value loss in float32 OUTSIDE autocast: PyTorch forbids
+            # F.binary_cross_entropy under autocast (it is numerically unsafe in
+            # fp16 -- it demands BCEWithLogits). The value head already applies the
+            # sigmoid, so we keep BCE-on-probability but compute it in fp32 with
+            # autocast disabled. (Vanilla MSE is autocast-safe and unaffected.)
+            with torch.autocast(self.device, enabled=False):
+                val = value.float().squeeze(1).clamp(1e-6, 1.0 - 1e-6)
+                bce = F.binary_cross_entropy(val, vt.float(), reduction="none")
+                loss_v = (bce * vwt.float()).sum() / vwt.float().sum().clamp_min(1e-6)
+                loss = loss_p.float() + loss_v
             self.opt.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.step(self.opt)

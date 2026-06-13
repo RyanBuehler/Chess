@@ -184,6 +184,56 @@ class NetMCTSPlayer:
         return index_to_move(best_idx, flip, board)
 
 
+class GoalNetMCTSPlayer:
+    """The agent for a GOAL arm, evaluated by conditioning on g=win (spec sec 15).
+
+    Loads a goal-conditioned checkpoint and searches with the protagonist-frame
+    minimax (GoalMCTS) under WIN_GOAL, so the eval-relevant ``pi(.|win)`` /
+    ``V(.|win)`` are exercised exactly as in training. The regression gate
+    guarantees this reproduces negamax for g=win, so Elo is comparable to the
+    vanilla arm. Interface matches NetMCTSPlayer (.name, .play)."""
+
+    def __init__(
+        self,
+        name: str,
+        checkpoint_path,
+        network_cfg,
+        simulations: int,
+        device: str = "cpu",
+        seed: int = 0,
+    ):
+        from chessrl.config.config import MCTSConfig
+        from chessrl.goals.templates import WIN_GOAL
+        from chessrl.mcts.reference import GoalMCTS
+        from chessrl.model.network import GoalNetEvaluator
+
+        self.name = name
+        self._eval = GoalNetEvaluator.from_checkpoint(
+            checkpoint_path, network_cfg, device=device
+        )
+        self._cfg = MCTSConfig(simulations=simulations)
+        self._mcts = GoalMCTS(self._eval, self._cfg, rng=np.random.default_rng(seed))
+        self._goal = WIN_GOAL
+
+    def play(self, board: chess.Board) -> chess.Move:
+        from chessrl.chess_env.moves import index_to_move
+
+        # Protagonist is the side to move: we are choosing this side's move under
+        # the win-goal, exactly as self-play does on a g=win ply.
+        visits, root_q = self._mcts.search(
+            board, goal=self._goal, protagonist=board.turn, add_noise=False
+        )
+        best_idx = max(visits, key=visits.get)
+        flip = board.turn == chess.BLACK
+        total = float(sum(visits.values())) or 1.0
+        top = sorted(visits.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        self._last_thoughts = [
+            [index_to_move(idx, flip, board).uci(), c / total] for idx, c in top
+        ]
+        self._last_root_q = float(root_q)
+        return index_to_move(best_idx, flip, board)
+
+
 class StockfishError(RuntimeError):
     pass
 

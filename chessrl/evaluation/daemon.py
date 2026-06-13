@@ -80,17 +80,33 @@ def _build_stockfish_players(cfg: EvalConfig) -> list:
     return out
 
 
+def _default_agent_factory(agent_name, ckpt_path, run_cfg, cfg):
+    """Build the agent player for a checkpoint. Goal arms (goal_mode != none)
+    are evaluated by conditioning on g=win via GoalNetMCTSPlayer (spec sec 15);
+    vanilla uses the plain NetMCTSPlayer. Shared by the daemon and the sweep."""
+    if run_cfg.goal.goal_mode != "none":
+        from chessrl.evaluation.players import GoalNetMCTSPlayer
+
+        return GoalNetMCTSPlayer(
+            agent_name, ckpt_path, run_cfg.network, cfg.agent_simulations, device="cpu",
+        )
+    return NetMCTSPlayer(
+        agent_name, ckpt_path, run_cfg.network, cfg.agent_simulations, device="cpu",
+    )
+
+
 def evaluate_checkpoint(run_dir, ckpt_path, cfg: EvalConfig, store: LadderStore,
-                        openings_offset: int) -> float:
+                        openings_offset: int, agent_factory=None) -> float:
     """Play ckpt vs the ladder, record results, refit ratings, append elo.jsonl.
-    Returns the checkpoint's fitted Elo."""
+    Returns the checkpoint's fitted Elo. ``agent_factory(agent_name, ckpt_path,
+    run_cfg, cfg)`` builds the agent player (default: goal-aware factory) so the
+    post-hoc sweep can inject a g=win-conditioned player or a stubbed one."""
     run_dir = Path(run_dir)
     run_cfg = RunConfig.from_json(run_dir / "config.json")
     step = _step_of(ckpt_path)
     agent_name = f"{_run_id(run_dir)}@{step}"
-    agent = NetMCTSPlayer(
-        agent_name, ckpt_path, run_cfg.network, cfg.agent_simulations, device="cpu",
-    )
+    factory = agent_factory or _default_agent_factory
+    agent = factory(agent_name, ckpt_path, run_cfg, cfg)
     store.upsert_player(agent_name, kind="agent", anchor_elo=None)
 
     rungs = _build_floor_players(seed=step) + _build_stockfish_players(cfg)

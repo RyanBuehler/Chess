@@ -236,6 +236,14 @@ def test_concurrent_goal_emits_live_feed_frames():
         assert isinstance(payload["fen"], str) and payload["fen"]
         assert isinstance(payload["last_move_uci"], str) and payload["last_move_uci"]
         assert "ply" in payload and "root_q" in payload and "top_moves" in payload
+        # Generic ancillary key/value list: a list of [str, str] pairs.
+        aux = payload["aux"]
+        assert isinstance(aux, list) and aux, "goal frame should carry aux pairs"
+        for pair in aux:
+            assert isinstance(pair, list) and len(pair) == 2
+            assert isinstance(pair[0], str) and isinstance(pair[1], str)
+        keys = {k for k, _ in aux}
+        assert {"goal", "deadline", "side", "P(achieve)"} <= keys, keys
 
     # Each game produces a terminal done=True frame as its last frame.
     for slot in ("wtest_b0_0", "wtest_b0_1"):

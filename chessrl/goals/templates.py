@@ -35,6 +35,16 @@ WIN = "win"
 
 KINDS = (CAPTURE, REACH_RANK, REACH_SQUARE, CHECK, CASTLE, PROMOTE, WIN)
 
+# Human-readable piece-type names for goal descriptions (chess.PAWN..KING).
+_PIECE_NAMES = {
+    chess.PAWN: "pawn",
+    chess.KNIGHT: "knight",
+    chess.BISHOP: "bishop",
+    chess.ROOK: "rook",
+    chess.QUEEN: "queen",
+    chess.KING: "king",
+}
+
 
 @dataclass(frozen=True)
 class GoalTemplate:
@@ -59,6 +69,30 @@ class GoalTemplate:
 
     def is_win(self) -> bool:
         return self.kind == WIN
+
+    def describe(self) -> str:
+        """A short human-readable phrase for this goal (UI/live-feed display).
+
+        Schema-agnostic on the consumer side: callers treat the result as an
+        opaque string. Examples: "win", "capture knight", "reach rank 8",
+        "give check", "castle", "promote"."""
+        if self.kind == WIN:
+            return "win"
+        if self.kind == CAPTURE:
+            return f"capture {_PIECE_NAMES.get(self.param('piece_type'), 'piece')}"
+        if self.kind == REACH_RANK:
+            return f"reach rank {self.param('rank')}"
+        if self.kind == REACH_SQUARE:
+            sq = self.param("square")
+            name = chess.square_name(sq) if isinstance(sq, int) else sq
+            return f"reach {name}"
+        if self.kind == CHECK:
+            return "give check"
+        if self.kind == CASTLE:
+            return "castle"
+        if self.kind == PROMOTE:
+            return "promote"
+        return self.kind
 
     def param(self, name, default=None):
         for k, v in self.params:

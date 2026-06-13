@@ -343,6 +343,7 @@ def _play_one_goal_move(
     Publishing is a PURE SIDE EFFECT mirroring _play_one_move's publish points."""
     protagonist = g.board.turn
     side = g.sides[protagonist]
+    searched_goal = side.active   # the active goal as searched for THIS move
 
     visits = mcts.visit_counts(g.tree)
     root_v = mcts.root_q(g.tree)        # protagonist-frame achievement prob at root
@@ -381,7 +382,8 @@ def _play_one_goal_move(
             if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
                 g.z = -1 if protagonist == chess.WHITE else 1
                 g.done = True
-                _publish_goal_move(publisher, g, chosen_move, root_v, top_moves)
+                _publish_goal_move(publisher, g, chosen_move, root_v, top_moves,
+                                   searched_goal, protagonist)
                 return
         else:
             g.resign_streak[protagonist] = 0
@@ -397,11 +399,26 @@ def _play_one_goal_move(
     _maybe_switch_to_win(side, g.states, protagonist, g.ply)
 
     _goal_check_pre_move_termination(g, sp_cfg)
-    _publish_goal_move(publisher, g, chosen_move, root_v, top_moves)
+    _publish_goal_move(publisher, g, chosen_move, root_v, top_moves,
+                       searched_goal, protagonist)
 
 
-def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_moves: list) -> None:
-    """Publish one goal-game frame mirroring _publish_move's payload schema."""
+def _goal_aux(active_goal, root_v: float, protagonist) -> list:
+    """Build the generic `aux` key/value pairs for a goal-game frame from
+    ALREADY-COMPUTED state (no rng, no new search). Each pair is [str, str].
+    The UI renders these schema-agnostically; the meaning lives here only."""
+    return [
+        ["goal", active_goal.describe()],
+        ["deadline", f"by ply {active_goal.deadline}"],
+        ["side", "white" if protagonist == chess.WHITE else "black"],
+        ["P(achieve)", f"{float(root_v):.2f}"],
+    ]
+
+
+def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_moves: list,
+                       active_goal=None, protagonist=None) -> None:
+    """Publish one goal-game frame mirroring _publish_move's payload schema, plus
+    a generic `aux` list of [key, value] string pairs describing the active goal."""
     publisher.publish(g.game_id, {
         "game_id": g.game_id,
         "fen": g.board.fen(),
@@ -411,4 +428,5 @@ def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_
         "top_moves": top_moves,
         "done": bool(g.done),
         "z": int(g.z) if g.done else None,
+        "aux": _goal_aux(active_goal, root_q, protagonist) if active_goal is not None else [],
     })

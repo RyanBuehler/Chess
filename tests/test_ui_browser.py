@@ -290,6 +290,39 @@ def test_live(server, browser):
         boards = page.query_selector_all("#live-grid .live-cell")
         assert ("no live feed" in hint) or (len(boards) > 0), \
             f"neither no-feed hint nor boards present: hint={hint!r}"
+
+        # GENERIC aux renderer: import the live.js module's renderAux and feed it
+        # a frame's `aux` list of [key, value] string pairs. The renderer must
+        # render whatever pairs are present without knowing what they mean.
+        rendered = page.evaluate(
+            """async () => {
+                const mod = await import('/live.js');
+                const dl = document.createElement('dl');
+                document.body.appendChild(dl);
+                const aux = [['goal', 'capture knight'],
+                             ['deadline', 'by ply 15'],
+                             ['side', 'white'],
+                             ['P(achieve)', '0.42']];
+                mod.renderAux(dl, aux);
+                const pairs = [...dl.querySelectorAll('dt')].map((dt, i) =>
+                    [dt.textContent, dl.querySelectorAll('dd')[i].textContent]);
+                // Empty aux => nothing rendered.
+                const empty = document.createElement('dl');
+                mod.renderAux(empty, []);
+                const emptyCount = empty.children.length;
+                mod.renderAux(empty, undefined);  // absent aux is a no-op too
+                return { pairs, emptyCount, emptyAfterUndefined: empty.children.length };
+            }"""
+        )
+        assert rendered["pairs"] == [
+            ["goal", "capture knight"],
+            ["deadline", "by ply 15"],
+            ["side", "white"],
+            ["P(achieve)", "0.42"],
+        ], f"aux pairs not rendered generically: {rendered['pairs']!r}"
+        assert rendered["emptyCount"] == 0, "empty aux should render nothing"
+        assert rendered["emptyAfterUndefined"] == 0, "absent aux should render nothing"
+
         _assert_no_console_errors(errors)
 
 

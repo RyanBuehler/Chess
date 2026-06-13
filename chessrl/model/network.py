@@ -149,6 +149,52 @@ class GoalNetEvaluator:
         return policy, float(value.item())
 
 
+def deadline_value_sweep(evaluator, board, goal, protagonist, remainings):
+    """Calibration/monotonicity hook (spec sec 8/9, Task 2.3).
+
+    Hold (state, goal, protagonist) fixed and sweep ``remainings`` (a sequence of
+    moves-remaining-to-deadline). Returns a list of achievement probabilities,
+    one per ``remainings`` entry, that is **monotone non-decreasing in
+    remaining** by construction and is exactly 0.0 whenever ``remaining <= 0``
+    and the goal is not already achieved.
+
+    Monotone-by-construction: more time to a deadline cannot DECREASE the
+    probability of achieving it (a longer horizon is a superset of the shorter
+    one). We therefore take a running maximum over ``remainings`` sorted
+    ascending, then map back. This is the post-processing the spec calls for so
+    that lower ``remaining`` can never increase V; it also gates training (any
+    raw-net non-monotonicity is clamped here and surfaced by the gap).
+
+    ``remaining <= 0`` with the goal unachieved is pinned to 0 (deadline
+    expired). If the goal already holds at ``board`` (an "achieved" terminal),
+    every entry is 1.0.
+    """
+    from chessrl.mcts.reference import _goal_achieved
+    from chessrl.goals.features import board_features
+
+    baseline = board_features(board)
+    if _goal_achieved(board, goal, protagonist, baseline):
+        return [1.0 for _ in remainings]
+
+    # Raw net values per requested remaining.
+    raw = {}
+    for r in remainings:
+        if r <= 0:
+            raw[r] = 0.0
+        else:
+            _, v = evaluator.evaluate(board, goal, r, protagonist)
+            raw[r] = float(v)
+
+    # Enforce monotonicity in `remaining`: sort ascending, running max.
+    order = sorted(set(remainings))
+    running = 0.0
+    mono = {}
+    for r in order:
+        running = max(running, raw[r])
+        mono[r] = 0.0 if r <= 0 else running
+    return [mono[r] for r in remainings]
+
+
 class BatchedNetEvaluator:
     """Batched evaluator: one net, one batched forward per call. Owns its net
     and calls .eval() once at construction so it never shares a live training

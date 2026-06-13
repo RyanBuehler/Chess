@@ -243,3 +243,64 @@ class BatchedNetEvaluator:
             )
         planes_batch = np.stack([to_model_input(encode_board(b)) for b in boards])
         return self.evaluate_planes(planes_batch)
+
+
+class BatchedGoalNetEvaluator:
+    """Batched evaluator for the goal-conditioned net (spec sec 8/9, Task 3.1).
+
+    Used by the goal-conditioned batched MCTS. ``evaluate_planes`` takes the
+    pre-encoded ``(N, NUM_PLANES + GOAL_PLANES, 8, 8)`` planes AND a per-leaf
+    ``deadlines`` vector (the moves-remaining-to-deadline scalars), and returns
+    softmaxed policies plus sigmoid achievement probabilities P(protagonist
+    achieves goal) in [0,1]. ``evaluate_one_goal`` is the single-leaf path used
+    by init_tree / advance (not part of the batch)."""
+
+    def __init__(self, net: PolicyValueNet, device: str = "cpu"):
+        assert net.goal_conditioned, "BatchedGoalNetEvaluator requires a goal-conditioned net"
+        self.device = device
+        self.net = net.to(device)
+        self.net.eval()
+
+    @classmethod
+    def from_checkpoint(
+        cls, path, network_cfg: NetworkConfig, device: str = "cpu"
+    ) -> "BatchedGoalNetEvaluator":
+        net = PolicyValueNet(network_cfg, goal_conditioned=True)
+        ckpt = torch.load(Path(path), map_location=device)
+        net.load_state_dict(ckpt["model"])
+        return cls(net, device=device)
+
+    @torch.no_grad()
+    def evaluate_planes(
+        self, planes_batch: np.ndarray, deadlines: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """planes_batch: float32 (N, NUM_PLANES + GOAL_PLANES, 8, 8). deadlines:
+        the per-leaf moves-remaining scalars (N,). Returns (policies
+        (N, NUM_ACTIONS) softmaxed float32, values (N,) float32 in [0,1]).
+        Empty input -> empty arrays."""
+        n = planes_batch.shape[0]
+        if n == 0:
+            return (
+                np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+            )
+        x = torch.from_numpy(planes_batch).to(self.device)
+        deadline = torch.tensor(
+            np.asarray(deadlines, dtype=np.float32).reshape(-1, 1) / DEADLINE_SCALE,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        logits, value = self.net(x, deadline)
+        policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
+        values = value.squeeze(1).cpu().numpy().astype(np.float32)
+        return policies, values
+
+    @torch.no_grad()
+    def evaluate_one_goal(self, board: chess.Board, goal, remaining: int, protagonist: bool):
+        """Single-leaf goal-conditioned evaluation (init_tree / advance path).
+        Returns (policy (NUM_ACTIONS,) softmaxed, P(achieve) in [0,1])."""
+        board_planes = to_model_input(encode_board(board))
+        goal_planes, _ = encode_goal(goal, remaining, protagonist)
+        planes = np.concatenate([board_planes, goal_planes.astype(np.float32)], axis=0)[None]
+        policies, values = self.evaluate_planes(planes, np.asarray([remaining], dtype=np.float32))
+        return policies[0], float(values[0])

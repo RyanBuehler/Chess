@@ -15,6 +15,23 @@ Key differences from the reference (all behavior-preserving at K=1):
 Sign convention is identical to the reference: Node.value_sum is from the
 perspective of the side to move at that node; a parent reads child quality as
 -child.q(); backup flips sign each level leaf->root.
+
+Goal-conditioned mode (spec sec 8, Task 3.1)
+--------------------------------------------
+When constructed with a ``goal`` + ``protagonist``, the search becomes the
+batched analogue of ``GoalReferenceMCTS``: a protagonist-frame **minimax** (NOT
+negamax) over ``V(s,g) = P(protagonist achieves g) in [0,1]`` with exact goal
+terminals. ``Node.value_sum`` then stores the protagonist-frame achievement
+probability summed over visits (no per-level sign flip on backup); selection
+converts to the parent-mover's exploitation view via ``q = sign*(2*V - 1)``
+(sign = +1 if the parent mover is the protagonist else -1), exactly as the
+reference. The copy-free leaf-parking path additionally encodes the goal planes
+and records the per-leaf ``remaining`` deadline scalar, evaluated together by a
+goal-conditioned ``evaluate_planes(planes_batch, deadlines)``.
+
+At leaves_per_tree (K) == 1 with a single tree and add_noise=False, this
+reproduces ``GoalReferenceMCTS`` EXACTLY (the Task 3.1 equivalence gate). The
+vanilla path (``goal=None``) is left UNCHANGED and still matches ReferenceMCTS.
 """
 import chess
 import numpy as np
@@ -23,33 +40,54 @@ from chessrl.chess_env.encoding import encode_board, to_model_input
 from chessrl.chess_env.game import terminal_value
 from chessrl.chess_env.moves import index_to_move, move_to_index
 from chessrl.config.config import MCTSConfig
-from chessrl.mcts.reference import Node
+from chessrl.goals.encoding import encode_goal
+from chessrl.goals.features import board_features
+from chessrl.mcts.reference import Node, goal_terminal_value
 
 
 class SearchTree:
     """One independent game tree: its root, a working board (kept at the root
-    position between rounds), and how many simulations have been credited."""
+    position between rounds), and how many simulations have been credited.
 
-    __slots__ = ("root", "board", "sims_done")
+    In goal-conditioned mode ``baseline`` holds the BoardFeatures at the search
+    root (for count-delta goal terminals); it is None in vanilla mode."""
 
-    def __init__(self, board: chess.Board):
+    __slots__ = ("root", "board", "sims_done", "baseline")
+
+    def __init__(self, board: chess.Board, baseline=None):
         self.root = Node(0.0)
         self.board = board
         self.sims_done = 0
+        self.baseline = baseline
 
 
 class BatchedMCTS:
-    def __init__(self, evaluator_many, cfg: MCTSConfig, rng: np.random.Generator | None = None):
+    def __init__(
+        self,
+        evaluator_many,
+        cfg: MCTSConfig,
+        rng: np.random.Generator | None = None,
+        goal=None,
+        protagonist: bool | None = None,
+    ):
         self.evaluator = evaluator_many
         self.cfg = cfg
         self.rng = rng if rng is not None else np.random.default_rng()
+        # Goal-conditioned mode: protagonist-frame minimax + goal terminals,
+        # threaded through the leaf-parking path. None -> vanilla negamax.
+        self.goal = goal
+        self.protagonist = protagonist
+        self.goal_mode = goal is not None
+        if self.goal_mode and protagonist is None:
+            raise ValueError("goal-conditioned BatchedMCTS requires a protagonist")
 
     # ---- public API -----------------------------------------------------
 
     def init_tree(self, board: chess.Board, add_noise: bool = False) -> SearchTree:
-        tree = SearchTree(board.copy())
-        policy, value = self._evaluate_one(tree.board)
-        self._expand(tree.root, tree.board, policy, value, is_terminal=False)
+        b = board.copy()
+        baseline = board_features(b) if self.goal_mode else None
+        tree = SearchTree(b, baseline=baseline)
+        value = self._expand_leaf(tree, tree.root, plies_from_root=0)
         tree.root.visit_count += 1            # initial expansion counts as one visit (matches reference)
         tree.root.value_sum += value
         if add_noise and tree.root.children:
@@ -66,9 +104,10 @@ class BatchedMCTS:
         non-terminal leaves selected this round (across all trees) are evaluated
         in a single evaluate_planes call."""
         k = self.cfg.leaves_per_tree
-        # parked entries: (tree, path, planes_float32, legal_idxs)
+        # parked entries: (tree, path, planes_float32, legal_idxs, deadline)
         # planes and legal_idxs are computed at park time, before popping, so
-        # no Board.copy() is needed.
+        # no Board.copy() is needed. ``deadline`` is the per-leaf remaining-to-
+        # deadline scalar (None in vanilla mode).
         parked = []
         # dirty_nodes: accumulate every node touched by virtual loss so we can
         # zero exactly those nodes after all backups (no full-tree DFS needed).
@@ -83,7 +122,8 @@ class BatchedMCTS:
                 self._apply_virtual_loss(path)
                 dirty_nodes.extend(path)
                 tree.sims_done += 1
-                term = terminal_value(tree.board)
+                plies = len(path) - 1
+                term = self._terminal_value(tree, plies)
                 if term is not None:
                     self._backup(path, term)
                     self._pop_to_root(tree, path)
@@ -92,13 +132,29 @@ class BatchedMCTS:
                     # working board is at the leaf — avoids Board.copy().
                     flip = tree.board.turn == chess.BLACK
                     legal_idxs = [move_to_index(m, flip) for m in tree.board.legal_moves]
-                    planes = to_model_input(encode_board(tree.board))
+                    if self.goal_mode:
+                        remaining = self.goal.deadline - plies
+                        goal_planes, _ = encode_goal(self.goal, remaining, self.protagonist)
+                        board_planes = to_model_input(encode_board(tree.board))
+                        planes = np.concatenate(
+                            [board_planes, goal_planes.astype(np.float32)], axis=0
+                        )
+                        deadline = remaining
+                    else:
+                        planes = to_model_input(encode_board(tree.board))
+                        deadline = None
                     self._pop_to_root(tree, path)
-                    parked.append((tree, path, planes, legal_idxs))
+                    parked.append((tree, path, planes, legal_idxs, deadline))
         if parked:
             planes_batch = np.stack([p[2] for p in parked])
-            policies, values = self.evaluator.evaluate_planes(planes_batch)
-            for (tree, path, _planes, legal_idxs), policy, value in zip(parked, policies, values):
+            if self.goal_mode:
+                deadlines = np.asarray([p[4] for p in parked], dtype=np.float32)
+                policies, values = self.evaluator.evaluate_planes(planes_batch, deadlines)
+            else:
+                policies, values = self.evaluator.evaluate_planes(planes_batch)
+            for (tree, path, _planes, legal_idxs, _deadline), policy, value in zip(
+                parked, policies, values
+            ):
                 self._expand_from_idxs(path[-1], legal_idxs, policy, float(value))
                 self._backup(path, float(value))
         # Clear virtual loss on exactly the nodes that were dirtied this round.
@@ -123,16 +179,14 @@ class BatchedMCTS:
         tree.board.push(index_to_move(action_index, tree.board.turn == chess.BLACK, tree.board))
         if child is None:
             tree.root = Node(0.0)
-            policy, value = self._evaluate_one(tree.board)
-            self._expand(tree.root, tree.board, policy, value, is_terminal=False)
+            value = self._expand_leaf(tree, tree.root, plies_from_root=0)
             tree.root.visit_count += 1
             tree.root.value_sum += value
             tree.sims_done = tree.root.visit_count
             return
         tree.root = child
         if not child.children and child.visit_count == 0:
-            policy, value = self._evaluate_one(tree.board)
-            self._expand(tree.root, tree.board, policy, value, is_terminal=False)
+            value = self._expand_leaf(tree, tree.root, plies_from_root=0)
             tree.root.visit_count += 1
             tree.root.value_sum += value
         # No ghost visit: child's true statistics are kept intact.
@@ -151,12 +205,14 @@ class BatchedMCTS:
         node = tree.root
         path = [node]
         while node.children:
-            idx, node = self._select(node)
+            idx, node = self._select(node, mover=tree.board.turn)
             tree.board.push(index_to_move(idx, tree.board.turn == chess.BLACK, tree.board))
             path.append(node)
         return path
 
-    def _select(self, node: Node):
+    def _select(self, node: Node, mover: bool):
+        if self.goal_mode:
+            return self._select_goal(node, mover)
         # effective visits/value include virtual loss; vloss adds visits valued
         # -1 from the parent's perspective.
         eff_parent_n = node.visit_count + node.vloss
@@ -176,31 +232,91 @@ class BatchedMCTS:
                 best_idx, best_child, best_score = idx, ch, score
         return best_idx, best_child
 
+    def _select_goal(self, node: Node, mover: bool):
+        """Protagonist-frame minimax selection (batched analogue of
+        ``GoalReferenceMCTS._select``). The parent mover's exploitation view on
+        the negamax [-1,1] scale is ``q = sign*(2*p - 1)`` with sign = +1 if the
+        mover is the protagonist else -1. Virtual loss adds pseudo-visits valued
+        at the worst achievement probability FOR THE PARENT MOVER (p=0 when the
+        mover is the protagonist, p=1 when the mover is the opponent), so vloss
+        pulls q toward -1 just like the vanilla path. At K=1 (vloss==0) this is
+        bit-identical to the reference."""
+        sign = 1.0 if mover == self.protagonist else -1.0
+        p_vloss = 0.0 if sign > 0 else 1.0  # worst achievement prob for this mover
+
+        eff_parent_n = node.visit_count + node.vloss
+        sqrt_n = eff_parent_n ** 0.5
+        if eff_parent_n:
+            parent_p = (node.value_sum + p_vloss * node.vloss) / eff_parent_n
+            parent_q = sign * (2.0 * parent_p - 1.0)
+        else:
+            parent_q = 0.0
+        fpu = parent_q - self.cfg.fpu_reduction
+        best_idx, best_child, best_score = -1, None, -1e18
+        for idx, ch in node.children.items():
+            ch_n = ch.visit_count + ch.vloss
+            if ch_n:
+                ch_p = (ch.value_sum + p_vloss * ch.vloss) / ch_n
+                q = sign * (2.0 * ch_p - 1.0)
+            else:
+                q = fpu
+            score = q + self.cfg.c_puct * ch.prior * sqrt_n / (1 + ch_n)
+            if score > best_score:
+                best_idx, best_child, best_score = idx, ch, score
+        return best_idx, best_child
+
     def _apply_virtual_loss(self, path: list) -> None:
         for n in path:
             n.vloss += 1
 
     def _backup(self, path: list, value: float) -> None:
         # remove the virtual loss this path added, then apply the real value.
+        # Goal mode: protagonist-frame, NO per-level sign flip (every node
+        # accumulates the same achievement probability). Vanilla: negamax flip.
         v = value
         for n in reversed(path):
             n.vloss -= 1
             n.visit_count += 1
             n.value_sum += v
-            v = -v
+            if not self.goal_mode:
+                v = -v
 
     def _pop_to_root(self, tree: SearchTree, path: list) -> None:
         for _ in range(len(path) - 1):
             tree.board.pop()
 
-    def _evaluate_one(self, board: chess.Board):
-        policies, values = self.evaluator.evaluate_many([board])
-        return policies[0], float(values[0])
+    def _terminal_value(self, tree: SearchTree, plies_from_root: int):
+        """Terminal value at the tree's current (leaf) board. Vanilla: zero-sum
+        ``terminal_value``. Goal mode: exact protagonist-frame goal terminal
+        (achieved 1 / expired 0 / game-over evaluate-g), with ``remaining =
+        deadline - plies_from_root``."""
+        if not self.goal_mode:
+            return terminal_value(tree.board)
+        remaining = self.goal.deadline - plies_from_root
+        return goal_terminal_value(
+            tree.board, self.goal, self.protagonist, remaining, tree.baseline
+        )
 
-    def _expand(self, node: Node, board: chess.Board, policy, value: float, is_terminal: bool) -> None:
+    def _expand_leaf(self, tree: SearchTree, node: Node, plies_from_root: int) -> float:
+        """Terminal-or-evaluate a single leaf at the tree's current board (used
+        by init_tree / advance, which are not part of the batch). Returns the
+        backup value; mirrors the reference ``_expand``."""
+        term = self._terminal_value(tree, plies_from_root)
+        if term is not None:
+            return term
+        board = tree.board
         flip = board.turn == chess.BLACK
         idxs = [move_to_index(m, flip) for m in board.legal_moves]
+        if self.goal_mode:
+            remaining = self.goal.deadline - plies_from_root
+            policy, value = self.evaluator.evaluate_one_goal(
+                board, self.goal, remaining, self.protagonist
+            )
+        else:
+            policies, values = self.evaluator.evaluate_many([board])
+            policy, value = policies[0], float(values[0])
         self._expand_from_idxs(node, idxs, policy, value)
+        return value
 
     def _expand_from_idxs(self, node: Node, idxs: list, policy, value: float) -> None:
         """Expand node using pre-computed legal move indices and a policy vector."""

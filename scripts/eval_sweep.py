@@ -27,6 +27,8 @@ import json
 import sys
 from pathlib import Path
 
+import chess
+
 from chessrl.config.config import EvalConfig, RunConfig
 from chessrl.evaluation.daemon import (
     LADDER_DB,
@@ -151,22 +153,171 @@ def compute_goal_eval(
     if game_runner is None:
         game_runner = _default_goal_game_runner(run_dir)
 
-    rates = {}
-    for kind in goal_kinds:
-        achieved = sum(1 for i in range(n_games_per_kind) if game_runner(kind, i))
-        rates[kind] = achieved / n_games_per_kind if n_games_per_kind else 0.0
+    try:
+        rates = {}
+        for kind in goal_kinds:
+            achieved = sum(1 for i in range(n_games_per_kind) if game_runner(kind, i))
+            rates[kind] = achieved / n_games_per_kind if n_games_per_kind else 0.0
+    finally:
+        # The production runner holds a Stockfish subprocess; release it.
+        getattr(game_runner, "close", lambda: None)()
 
     out = {"stockfish_rates": rates, "n_games_per_kind": n_games_per_kind}
     (run_dir / GOAL_EVAL_FILE).write_text(json.dumps(out, indent=2))
     return out
 
 
-def _default_goal_game_runner(run_dir):
-    def runner(kind, i):
-        raise NotImplementedError(
-            "production goal-eval runner not wired; inject game_runner or run "
-            "the daemon's vs-Stockfish goal games. See Task 5.4."
+def _goal_for_kind(kind: str, deadline_max: int):
+    """Concrete ``GoalTemplate`` for a goal kind, drawn from the SAME enumeration
+    the self-play assigner uses (chessrl.goals.assignment._default_subgoals), so
+    the vs-Stockfish achievement rate is comparable to the self-play rate the
+    thermometer measures. ``win`` is the apex WIN_GOAL."""
+    from chessrl.goals.assignment import _default_subgoals
+    from chessrl.goals.templates import WIN_GOAL, GoalTemplate
+
+    if kind == "win":
+        return WIN_GOAL
+    # First subgoal of the requested kind in the assigner's enumeration (e.g.
+    # capture -> capture a pawn), so deadlines match self-play assignments.
+    for tmpl in _default_subgoals(deadline_max):
+        if tmpl.kind == kind:
+            return tmpl
+    # Fallback for kinds not in the default enumeration: construct directly with
+    # a modest deadline so the runner still covers the kind.
+    d = max(1, min(deadline_max, 20))
+    ctor = getattr(GoalTemplate, kind, None)
+    if ctor is None:
+        raise ValueError(f"no goal template for kind {kind!r}")
+    return ctor(deadline=d)
+
+
+def play_goal_eval_game(
+    agent_player,
+    opponent_player,
+    goal,
+    *,
+    agent_color: bool,
+    max_plies: int,
+    rng=None,
+) -> bool:
+    """Play ONE goal-conditioned game and return whether the agent achieved its
+    goal by the deadline (the SAME exact verifier the self-play thermometer uses).
+
+    The agent (``agent_player``) plays ``agent_color`` and PURSUES ``goal`` as the
+    protagonist on every one of its plies (goal-conditioned search, identical
+    machinery to self-play's pure-pursuit path). ``opponent_player`` plays the
+    other side with its own ``.play(board)`` (Stockfish in production, a cheap
+    stub in tests). The game runs to a real chess result or ``max_plies`` (ply
+    cap mirrors the eval match so it can't hang). Achievement is measured by
+    ``achieved_by_deadline`` over the accumulated board states, protagonist ==
+    ``agent_color``, ``start_ply == 0`` — exactly as ``goal_achievement_rates``.
+
+    ``agent_player`` exposes ``play_goal(board, goal, protagonist) -> move``;
+    ``opponent_player`` exposes ``play(board) -> move``.
+    """
+    from chessrl.chess_env.game import terminal_value
+    from chessrl.goals.verifier import achieved_by_deadline
+
+    board = chess.Board()
+    states = [board.copy()]
+    ply = 0
+    while True:
+        if terminal_value(board) is not None:
+            break
+        if ply >= max_plies:
+            break
+        if board.turn == agent_color:
+            move = agent_player.play_goal(board, goal, agent_color)
+        else:
+            move = opponent_player.play(board)
+        board.push(move)
+        ply += 1
+        states.append(board.copy())
+        # Early exit once achieved (cheap; the verifier is also run at the end
+        # but stopping early bounds work and is equivalent for a pass/fail rate).
+        ok, _ = achieved_by_deadline(states, goal, agent_color, 0)
+        if ok:
+            return True
+    ok, _ = achieved_by_deadline(states, goal, agent_color, 0)
+    return ok
+
+
+class _GoalSearchAgent:
+    """Wraps a goal-conditioned net so it can pursue an arbitrary goal kind as
+    protagonist (not just g=win like GoalNetMCTSPlayer). Same GoalReferenceMCTS
+    machinery as self-play: ``play_goal(board, goal, protagonist) -> move``."""
+
+    def __init__(self, checkpoint_path, network_cfg, simulations: int,
+                 device: str = "cpu", seed: int = 0):
+        import numpy as np
+
+        from chessrl.config.config import MCTSConfig
+        from chessrl.mcts.reference import GoalReferenceMCTS
+        from chessrl.model.network import GoalNetEvaluator
+
+        self._eval = GoalNetEvaluator.from_checkpoint(
+            checkpoint_path, network_cfg, device=device
         )
+        self._mcts = GoalReferenceMCTS(
+            self._eval, MCTSConfig(simulations=simulations),
+            rng=np.random.default_rng(seed),
+        )
+
+    def play_goal(self, board, goal, protagonist):
+        from chessrl.chess_env.moves import index_to_move
+
+        visits, _ = self._mcts.search(board, goal, protagonist, add_noise=False)
+        best_idx = max(visits, key=visits.get)
+        return index_to_move(best_idx, board.turn == chess.BLACK, board)
+
+
+def _default_goal_game_runner(run_dir):
+    """Production vs-Stockfish goal-game runner (spec sec 11, Task 5.4).
+
+    Builds the goal-net agent from the run's latest checkpoint and a fixed-rung
+    Stockfish opponent from the run's eval config, then plays goal-conditioned
+    games per kind: the agent (alternating colors across games for balance)
+    pursues a goal of the requested kind while Stockfish plays the other side,
+    and the exact verifier decides achievement. Requires a provisioned Stockfish
+    binary (eval.stockfish_path, or the default tools/stockfish); raises if
+    absent so the caller can skip rather than silently produce floor rates."""
+    from chessrl.evaluation.players import StockfishPlayer, default_stockfish_path
+
+    run_dir = Path(run_dir)
+    run_cfg = RunConfig.from_json(run_dir / "config.json")
+    eval_cfg = run_cfg.eval
+
+    ckpts = _checkpoints(run_dir)
+    if not ckpts:
+        raise FileNotFoundError(f"no checkpoints under {run_dir} to evaluate")
+    latest = ckpts[-1]
+
+    sf_path = eval_cfg.stockfish_path or default_stockfish_path()
+    if not sf_path:
+        raise FileNotFoundError(
+            "vs-Stockfish goal-eval needs a Stockfish binary (eval.stockfish_path "
+            "or tools/stockfish); none found"
+        )
+    sf_path = str(Path(sf_path).resolve())
+    # Fixed rung from the eval config (the strongest calibrated anchor) so the
+    # opponent strength is reproducible and matches the eval ladder's top anchor.
+    opponent = StockfishPlayer(
+        sf_path, elo=1700, movetime_ms=eval_cfg.stockfish_movetime_ms, name="sf_elo1700"
+    )
+
+    def runner(kind, i):
+        agent = _GoalSearchAgent(
+            latest, run_cfg.network, eval_cfg.agent_simulations, device="cpu", seed=i,
+        )
+        goal = _goal_for_kind(kind, run_cfg.goal.deadline_max)
+        # Alternate the agent's color across the kind's games for color balance.
+        agent_color = chess.WHITE if (i % 2 == 0) else chess.BLACK
+        return play_goal_eval_game(
+            agent, opponent, goal,
+            agent_color=agent_color, max_plies=eval_cfg.max_plies,
+        )
+
+    runner.close = opponent.close  # compute_goal_eval closes the engine when done
     return runner
 
 

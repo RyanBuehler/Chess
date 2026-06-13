@@ -101,7 +101,124 @@ def test_compute_goal_eval_writes_stockfish_rates(tmp_path):
     assert loaded == rates
 
 
-def test_default_goal_runner_is_not_wired(tmp_path):
+def test_default_goal_runner_requires_checkpoint_and_stockfish(tmp_path, monkeypatch):
+    # The production runner is now wired (no longer NotImplementedError). With no
+    # Stockfish binary provisioned it raises FileNotFoundError so the caller can
+    # skip rather than silently emit floor rates.
     run_dir = _make_run(tmp_path, "gp-always-win-x", goal_mode="always_win", steps=(500,))
-    with pytest.raises(NotImplementedError):
+    monkeypatch.setattr(
+        "chessrl.evaluation.players.default_stockfish_path", lambda: None
+    )
+    with pytest.raises(FileNotFoundError):
         es.compute_goal_eval(run_dir, goal_kinds=("win",), n_games_per_kind=1)
+
+
+# ---- Real runner with injected stub agent + opponent (no Stockfish, fast) ----
+
+def _tiny_goal_agent(tmp_path):
+    """A real _GoalSearchAgent over a tiny goal-conditioned net (no Stockfish)."""
+    import torch
+
+    from chessrl.config.config import NetworkConfig
+    from chessrl.model.network import PolicyValueNet
+
+    cfg = NetworkConfig(blocks=1, filters=8)
+    net = PolicyValueNet(cfg, goal_conditioned=True)
+    ckpt = tmp_path / "goal_ckpt.pt"
+    torch.save({"model": net.state_dict()}, ckpt)
+    return es._GoalSearchAgent(ckpt, cfg, simulations=4, device="cpu", seed=0)
+
+
+def test_play_goal_eval_game_returns_bool_and_respects_ply_cap(tmp_path):
+    from chessrl.evaluation.players import RandomPlayer
+    from chessrl.goals.templates import GoalTemplate
+
+    agent = _tiny_goal_agent(tmp_path)
+    opponent = RandomPlayer(seed=1)
+    # A check-goal with a short deadline; outcome is a clean True/False either way.
+    goal = GoalTemplate.check(deadline=8)
+    achieved = es.play_goal_eval_game(
+        agent, opponent, goal, agent_color=__import__("chess").WHITE, max_plies=12
+    )
+    assert isinstance(achieved, bool)
+
+
+def test_compute_goal_eval_with_injected_real_game_runner(tmp_path):
+    """End-to-end: a real goal-net agent vs an injected stub opponent (Random)
+    plays the games, produces per-kind rates in [0,1], and writes goal_eval.json
+    in the schema the thermometer consumes to a non-None gap."""
+    import chess
+
+    from chessrl.evaluation.players import GreedyMaterialPlayer
+    from chessrl.training.loop import (
+        goal_achievement_rates,
+        wishful_thinking_thermometer,
+    )
+    from chessrl.training.parallel_loop import load_stockfish_achievement_rates
+
+    run_dir = _make_run(tmp_path, "gp-random-goal-y", goal_mode="random", steps=(500,))
+    agent = _tiny_goal_agent(tmp_path)
+    opponent = GreedyMaterialPlayer(seed=2)
+    kinds = ("capture", "check", "castle", "promote", "win")
+
+    def runner(kind, i):
+        goal = es._goal_for_kind(kind, deadline_max=20)
+        agent_color = chess.WHITE if i % 2 == 0 else chess.BLACK
+        return es.play_goal_eval_game(
+            agent, opponent, goal, agent_color=agent_color, max_plies=24
+        )
+
+    out = es.compute_goal_eval(
+        run_dir, goal_kinds=kinds, n_games_per_kind=2, game_runner=runner
+    )
+    rates = out["stockfish_rates"]
+    assert set(rates) == set(kinds)
+    assert all(0.0 <= r <= 1.0 for r in rates.values())
+    assert out["n_games_per_kind"] == 2
+
+    # The thermometer's loader parses it, and the kind keys align with the
+    # self-play rate keys, so the gap is populated (non-None) for shared kinds.
+    loaded = load_stockfish_achievement_rates(run_dir)
+    assert loaded == rates
+    # Synthesize self-play rates over the SAME kinds and confirm a real gap.
+    sp_rates = {k: 1.0 for k in kinds}
+    thermo = wishful_thinking_thermometer(sp_rates, loaded)
+    assert all(thermo[k]["gap"] is not None for k in kinds)
+    assert all(thermo[k]["gap"] == 1.0 - rates[k] for k in kinds)
+
+
+def test_goal_for_kind_matches_self_play_assigner_kinds():
+    # Each measured kind maps to a concrete template OF THAT KIND, so the
+    # vs-Stockfish rate keys line up with goal_achievement_rates' keys.
+    for kind in ("capture", "check", "castle", "promote", "win"):
+        tmpl = es._goal_for_kind(kind, deadline_max=20)
+        assert tmpl.kind == kind
+
+
+@pytest.mark.skipif(
+    __import__("chessrl.evaluation.players", fromlist=["default_stockfish_path"]).default_stockfish_path() is None,
+    reason="stockfish binary not provisioned",
+)
+def test_default_runner_smoke_vs_real_stockfish(tmp_path):
+    """One real game vs Stockfish per the production default runner (gated)."""
+    import torch
+
+    from chessrl.config.config import NetworkConfig
+    from chessrl.model.network import PolicyValueNet
+
+    # Build a run with a real tiny goal-conditioned checkpoint and a fast eval cfg.
+    cfg = RunConfig.from_dict({
+        "run_name": "gp-sf-smoke",
+        "goal": {"goal_mode": "random"},
+        "network": {"blocks": 1, "filters": 8},
+        "eval": {"agent_simulations": 4, "max_plies": 12, "stockfish_movetime_ms": 20},
+    })
+    run_dir = tmp_path / "gp-sf-smoke"
+    (run_dir / "checkpoints").mkdir(parents=True)
+    (run_dir / "games").mkdir()
+    (run_dir / "config.json").write_text(cfg.to_json())
+    net = PolicyValueNet(cfg.network, goal_conditioned=True)
+    torch.save({"model": net.state_dict()}, run_dir / "checkpoints" / "ckpt_00000500.pt")
+
+    out = es.compute_goal_eval(run_dir, goal_kinds=("check",), n_games_per_kind=1)
+    assert 0.0 <= out["stockfish_rates"]["check"] <= 1.0

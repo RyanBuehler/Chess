@@ -22,6 +22,16 @@ class UniformGoalEvaluator:
         return np.full(NUM_ACTIONS, 1.0 / NUM_ACTIONS, dtype=np.float64), self.value
 
 
+class _WinOnlyAssigner(GoalAssigner):
+    """Hands out the win-goal to every side."""
+
+    def __init__(self):
+        pass
+
+    def assign(self) -> GoalTemplate:
+        return WIN_GOAL
+
+
 class _OneShotAssigner(GoalAssigner):
     """Hands out a fixed sub-goal to every side (a 1-ply capture-queen goal that
     cannot be satisfied at the start, so it resolves by deadline expiry)."""
@@ -91,6 +101,58 @@ def test_pure_pursuit_records_active_and_assigned_and_visits():
     # Protagonist matches the side to move at each ply (White at even, Black odd).
     for t in range(T):
         assert rec.protagonist[t] == (1 if t % 2 == 0 else 0)
+
+
+def test_no_resign_while_pursuing_a_hard_subgoal():
+    # A side pursuing a hard sub-goal whose achievement prob is very low
+    # (root_q = 2*0.001 - 1 << -0.95) must NOT resign the GAME: resignation is
+    # meaningful only under the win-goal (value == P(win)). A long-deadline
+    # sub-goal keeps the side in pursuit for the whole game.
+    subgoal = GoalTemplate.capture(chess.QUEEN, deadline=512)
+    assigner = _OneShotAssigner(subgoal)
+    mcts_cfg = MCTSConfig(simulations=4, temperature_moves=0)
+    sp_cfg = SelfPlayConfig(
+        ply_cap=12,
+        resign_playout_fraction=0.0,   # never skip resignation
+        resign_threshold=-0.95,
+        resign_consecutive=1,
+    )
+    goal_cfg = GoalConfig(goal_mode="random")
+
+    rec, board, z = play_goal_game(
+        UniformGoalEvaluator(value=0.001), mcts_cfg, sp_cfg, goal_cfg,
+        np.random.default_rng(0), assigner,
+    )
+
+    # The game ran to the ply cap (drawn), NOT resigned over the sub-goal.
+    assert z == 0
+    assert len(rec) == sp_cfg.ply_cap
+    # Every searched ply was under the (unresolved) sub-goal.
+    active = [deserialize_goal(b) for b in rec.active_blob]
+    assert all(not g.is_win() for g in active)
+
+
+def test_resign_under_win_goal_with_low_win_prob():
+    # Under the win-goal, a very low achievement prob (== low P(win)) DOES trip
+    # resignation, preserving the legacy threshold/streak semantics.
+    assigner = _WinOnlyAssigner()
+    mcts_cfg = MCTSConfig(simulations=4, temperature_moves=0)
+    sp_cfg = SelfPlayConfig(
+        ply_cap=20,
+        resign_playout_fraction=0.0,
+        resign_threshold=-0.95,
+        resign_consecutive=1,
+    )
+    goal_cfg = GoalConfig(goal_mode="always_win")
+
+    rec, board, z = play_goal_game(
+        UniformGoalEvaluator(value=0.001), mcts_cfg, sp_cfg, goal_cfg,
+        np.random.default_rng(0), assigner,
+    )
+
+    # White (first to move, under win-goal, P(win)~0) resigns on its first move.
+    assert z == -1
+    assert len(rec) == 1
 
 
 def test_win_floor_fraction_over_many_assignments():

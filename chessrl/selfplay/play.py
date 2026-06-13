@@ -160,14 +160,27 @@ def play_goal_game(
             active_goal=side.active,
         )
 
-        # Resignation uses the protagonist-frame achievement prob mapped to
-        # negamax scale (2p-1) so the legacy threshold semantics carry over.
-        root_q = 2.0 * root_v - 1.0
-        if root_q < sp_cfg.resign_threshold:
-            resign_streak[protagonist] += 1
-            if allow_resign and resign_streak[protagonist] >= sp_cfg.resign_consecutive:
-                z = -1 if protagonist == chess.WHITE else 1
-                break
+        # Resignation is meaningful ONLY under the win-goal, whose value ==
+        # P(win). A hard sub-goal (e.g. "capture queen in 15") routinely has a
+        # tiny achievement prob, which would trip the threshold even when the
+        # game position is fine -- resigning the GAME over an unlikely SUB-GOAL.
+        # So only allow resignation while the active goal is the win-goal; while
+        # pursuing a sub-goal, leave the streak reset.
+        #
+        # NOTE: the batched self-play worker path must apply this SAME gate
+        # (only resign under the win-goal) -- that path is being fixed
+        # separately; this contract must be mirrored there.
+        if side.active.is_win():
+            # Map the protagonist-frame achievement prob to negamax scale (2p-1)
+            # so the legacy threshold semantics carry over for the win-goal.
+            root_q = 2.0 * root_v - 1.0
+            if root_q < sp_cfg.resign_threshold:
+                resign_streak[protagonist] += 1
+                if allow_resign and resign_streak[protagonist] >= sp_cfg.resign_consecutive:
+                    z = -1 if protagonist == chess.WHITE else 1
+                    break
+            else:
+                resign_streak[protagonist] = 0
         else:
             resign_streak[protagonist] = 0
 

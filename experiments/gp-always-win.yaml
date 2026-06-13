@@ -1,0 +1,31 @@
+# Goal-playground arm: ALWAYS-WIN apparatus control (spec sec 13).
+# Full goal apparatus (conditioning planes, BCE value head, HER), but only ever
+# g=win. Isolates the apparatus (planes / value-retarget / HER), NOT goal
+# diversity. Identical to gp-vanilla.yaml and gp-random-goal.yaml EXCEPT
+# goal.goal_mode and the feed_port range. 6x64 net, 200 sims, from scratch.
+run_name: gp-always-win
+network: {blocks: 6, filters: 64}
+mcts: {simulations: 200, temperature_moves: 30, leaves_per_tree: 1}
+selfplay:
+  workers: 4
+  concurrent_games: 32
+  ply_cap: 512
+  feed_port: 5565            # workers publish on 5565..5568
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  buffer_size: 500000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 500
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 8
+  agent_simulations: 200
+  max_plies: 200
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50
+goal:
+  goal_mode: always_win
+  win_floor: 0.2

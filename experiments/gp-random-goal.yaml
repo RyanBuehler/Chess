@@ -1,0 +1,31 @@
+# Goal-playground arm: RANDOM-GOAL diversity arm (spec sec 13).
+# Full goal apparatus + diverse goals sampled uniformly (with the win-floor).
+# Isolates goal *diversity* vs the always-win apparatus control. Identical to
+# gp-vanilla.yaml and gp-always-win.yaml EXCEPT goal.goal_mode and the feed_port
+# range. 6x64 net, 200 sims, from scratch.
+run_name: gp-random-goal
+network: {blocks: 6, filters: 64}
+mcts: {simulations: 200, temperature_moves: 30, leaves_per_tree: 1}
+selfplay:
+  workers: 4
+  concurrent_games: 32
+  ply_cap: 512
+  feed_port: 5575            # workers publish on 5575..5578
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  buffer_size: 500000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 500
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 8
+  agent_simulations: 200
+  max_plies: 200
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50
+goal:
+  goal_mode: random
+  win_floor: 0.2

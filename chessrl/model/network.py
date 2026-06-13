@@ -1,4 +1,19 @@
-"""Policy-value ResNet (AlphaZero-style, configurable size)."""
+"""Policy-value ResNet (AlphaZero-style, configurable size).
+
+Two variants share one class, selected by the ``goal_conditioned`` flag:
+
+* **vanilla** (default): 21 input planes, ``tanh`` value head in [-1, 1] (the
+  side-to-move zero-sum value), single-argument forward. Used by the vanilla arm
+  and all pre-existing code. UNCHANGED.
+* **goal-conditioned**: ``21 + GOAL_PLANES`` input planes (board + goal
+  conditioning), and a value head that ends in ``sigmoid`` (achievement
+  probability in [0, 1]) and takes the **deadline scalar** concatenated at its
+  first Linear layer. ``forward(x, deadline)`` takes a second argument. Used by
+  the goal arms (always-win / random-goal / lp-goal) per spec sec 8, sec 9.
+
+A spatially-constant deadline plane is poorly legible to a conv tower; the
+scalar fed at the FC is (spec sec 5 review finding) — hence the side-input.
+"""
 from pathlib import Path
 
 import chess
@@ -8,6 +23,7 @@ import torch.nn as nn
 
 from chessrl.chess_env.encoding import NUM_PLANES, encode_board, to_model_input
 from chessrl.config.config import NetworkConfig
+from chessrl.goals.encoding import GOAL_PLANES, encode_goal
 
 
 class ResBlock(nn.Module):
@@ -25,31 +41,59 @@ class ResBlock(nn.Module):
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, cfg: NetworkConfig):
+    def __init__(self, cfg: NetworkConfig, goal_conditioned: bool = False):
         super().__init__()
+        self.goal_conditioned = goal_conditioned
         ch = cfg.filters
+        in_planes = NUM_PLANES + GOAL_PLANES if goal_conditioned else NUM_PLANES
         self.stem = nn.Sequential(
-            nn.Conv2d(NUM_PLANES, ch, 3, padding=1, bias=False),
+            nn.Conv2d(in_planes, ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(ch),
             nn.ReLU(),
         )
         self.tower = nn.Sequential(*[ResBlock(ch) for _ in range(cfg.blocks)])
         self.policy_conv = nn.Conv2d(ch, 73, 1)  # AZ-style conv head, NOT flatten->FC
-        self.value_head = nn.Sequential(
-            nn.Conv2d(ch, 8, 1),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(8 * 64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Tanh(),
-        )
+        if goal_conditioned:
+            # Value head reduces the conv features, then concatenates the
+            # deadline scalar at the first Linear, and ends in sigmoid (an
+            # achievement probability in [0,1], spec sec 8). Split into a conv
+            # body + an FC head so the scalar can be cat'd between them.
+            self.value_body = nn.Sequential(
+                nn.Conv2d(ch, 8, 1),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.Flatten(),
+            )
+            self.value_fc = nn.Sequential(
+                nn.Linear(8 * 64 + 1, 64),   # +1 for the deadline side-input
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.value_head = nn.Sequential(
+                nn.Conv2d(ch, 8, 1),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(8 * 64, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Tanh(),
+            )
 
-    def forward(self, x):
+    def forward(self, x, deadline=None):
         h = self.tower(self.stem(x))
         # (B,73,rank,file) -> (B,rank,file,73) -> flat, so index = square*73 + type
         logits = self.policy_conv(h).permute(0, 2, 3, 1).flatten(1)
+        if self.goal_conditioned:
+            if deadline is None:
+                raise ValueError("goal-conditioned net requires a deadline scalar")
+            feat = self.value_body(h)
+            if deadline.dim() == 1:
+                deadline = deadline.unsqueeze(1)
+            value = self.value_fc(torch.cat([feat, deadline.to(feat.dtype)], dim=1))
+            return logits, value
         return logits, self.value_head(h)
 
 
@@ -65,6 +109,42 @@ class NetEvaluator:
         self.net.eval()
         x = torch.from_numpy(to_model_input(encode_board(board))).unsqueeze(0).to(self.device)
         logits, value = self.net(x)
+        policy = torch.softmax(logits[0], dim=0).cpu().numpy()
+        return policy, float(value.item())
+
+
+# Deadline scalar normalization. The encoder returns `remaining` (plies to the
+# deadline) raw; we feed it to the FC scaled into a small range so it is on the
+# same order as the conv features. Calibration/monotonicity (Task 2.3) operates
+# on the post-net probability, not this raw scale.
+DEADLINE_SCALE = 60.0
+
+
+def _deadline_tensor(remaining, device, scale: float = DEADLINE_SCALE):
+    return torch.tensor([[float(remaining) / scale]], dtype=torch.float32, device=device)
+
+
+class GoalNetEvaluator:
+    """Single-position evaluator for the goal-conditioned net (spec sec 8/9).
+
+    Returns (policy, P(protagonist achieves goal by deadline)) where the value is
+    a sigmoid achievement probability in [0,1]. Mirrors NetEvaluator's interface
+    but takes the goal/remaining/protagonist conditioning."""
+
+    def __init__(self, net: PolicyValueNet, device: str = "cpu"):
+        assert net.goal_conditioned, "GoalNetEvaluator requires a goal-conditioned net"
+        self.net = net.to(device)
+        self.device = device
+
+    @torch.no_grad()
+    def evaluate(self, board: chess.Board, goal, remaining: int, protagonist: bool):
+        self.net.eval()
+        board_planes = to_model_input(encode_board(board))
+        goal_planes, _ = encode_goal(goal, remaining, protagonist)
+        x = np.concatenate([board_planes, goal_planes.astype(np.float32)], axis=0)
+        x = torch.from_numpy(x).unsqueeze(0).to(self.device)
+        deadline = _deadline_tensor(remaining, self.device)
+        logits, value = self.net(x, deadline)
         policy = torch.softmax(logits[0], dim=0).cpu().numpy()
         return policy, float(value.item())
 

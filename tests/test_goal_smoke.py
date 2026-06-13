@@ -70,3 +70,21 @@ def test_random_goal_arm_smoke(tmp_path):
     assert rec.has_goals()
     # Goal achievement-rate diagnostic emitted at least once.
     assert any(m.get("goal_achievement_rate") for m in metrics)
+
+
+@pytest.mark.slow
+def test_lp_goal_arm_runs_through_curriculum(tmp_path):
+    # A few more games so the verifier mints at least one sub-goal delta.
+    run_dir, npz, metrics = _run_arm(tmp_path, "gp-lp-goal", "lp", games=4)
+    rec = GameRecord.load(npz[0])
+    assert rec.has_goals()
+    # The trainer persisted a repertoire snapshot for workers to reload.
+    rep_path = run_dir / "repertoire.json"
+    assert rep_path.exists(), "lp arm did not persist a repertoire snapshot"
+    from chessrl.goals.repertoire import Repertoire
+
+    rep = Repertoire.load(rep_path)
+    # At minimum the apex win-goal is present; weak early play almost always
+    # mints at least one capture delta too, but the floor assertion is the
+    # win-goal so the test is deterministic.
+    assert any(t.is_win() for t in rep.templates())

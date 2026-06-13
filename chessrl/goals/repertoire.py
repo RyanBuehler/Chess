@@ -184,6 +184,44 @@ class Repertoire:
                     minted.append(tmpl)
         return minted
 
+    def update_stats_from_record(self, rec) -> None:
+        """Record one attempt/outcome per side for this game's *assigned* goals.
+
+        Each side was assigned a goal at game start; whether the protagonist
+        achieved that assigned goal by its deadline is one attempt (success iff
+        achieved). Win-goal assignments are recorded against the apex template so
+        its LP can climb (spec sec 12 — win's LP rises as competence accrues).
+        The assigned goal is read from the record's stored blob (the source of
+        truth) and the outcome recomputed exactly via the verifier."""
+        from chessrl.selfplay.records import deserialize_goal
+        from chessrl.training.her import reconstruct_states
+
+        if not rec.has_goals():
+            return
+        states = reconstruct_states(rec)
+        seen_proto = {}
+        # The assigned goal is constant per side across the game; grab the first
+        # ply each protagonist appears.
+        for i in range(len(rec)):
+            proto_white = rec.protagonist[i] == 1
+            color = chess.WHITE if proto_white else chess.BLACK
+            if color in seen_proto:
+                continue
+            seen_proto[color] = (i, deserialize_goal(str(rec.assigned_blob[i])))
+        for color, (start_ply, goal) in seen_proto.items():
+            self.ensure(goal)
+            ok, _ = achieved_by_deadline(states, goal, color, start_ply=start_ply)
+            self.record_attempt(goal, ok)
+
+    def update_and_refine_from_record(self, rec) -> list[GoalTemplate]:
+        """The full per-game feedback step (plan Task 4.3): mint first-seen
+        deltas, update assigned-goal stats, then spawn any plateaued children.
+        Returns all newly minted templates (mints + spawned children)."""
+        minted = self.update_from_record(rec)
+        self.update_stats_from_record(rec)
+        minted += self.maybe_spawn_children()
+        return minted
+
     # --- child-spawning --------------------------------------------------
     def maybe_spawn_children(self) -> list[GoalTemplate]:
         """Spawn tighter-deadline children for any template whose windowed

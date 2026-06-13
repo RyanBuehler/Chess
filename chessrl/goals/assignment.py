@@ -10,7 +10,11 @@ curriculum. Today it provides four modes:
                      templates (capture/check/castle/reach), with the
                      **win-floor** applied: at least ``win_floor`` fraction of
                      assignments are ``WIN_GOAL``.
-* ``lp``          -> Stage-4 hook; falls back to ``random`` for now.
+* ``lp``          -> samples from a learning-progress ``Curriculum`` built over
+                     the run's persisted repertoire snapshot (Stage 4). When no
+                     curriculum is supplied (e.g. a unit test, or before the
+                     first snapshot exists) it falls back to the ``random``
+                     enumeration so the path is always well-defined.
 
 The win-floor is enforced *per assignment* by a Bernoulli draw at rate
 ``win_floor`` (each assignment is, with that probability, forced to win). Over
@@ -52,28 +56,39 @@ class GoalAssigner:
     that mode to take the legacy vanilla path unchanged.
     """
 
-    def __init__(self, cfg: GoalConfig, rng: np.random.Generator | None = None):
+    def __init__(self, cfg: GoalConfig, rng: np.random.Generator | None = None,
+                 curriculum=None):
         if cfg.goal_mode == "none":
             raise ValueError("GoalAssigner is not used in goal_mode='none' (vanilla)")
         self.cfg = cfg
         self.rng = rng if rng is not None else np.random.default_rng()
         self._subgoals = _default_subgoals(cfg.deadline_max)
+        # An LP Curriculum snapshot (Stage 4); None falls back to random.
+        self.curriculum = curriculum
 
     def assign(self) -> GoalTemplate:
         """Return a goal for one side of one game."""
         mode = self.cfg.goal_mode
         if mode == "always_win":
             return WIN_GOAL
-        # random or lp (lp falls back to random until Stage 4).
-        # Win-floor first: with probability win_floor, force the apex goal.
+        if mode == "lp" and self.curriculum is not None:
+            # The curriculum applies the win-floor internally (spec sec 12).
+            return self.curriculum.sample(self.rng)
+        # random (or lp before a snapshot exists): win-floor then uniform.
         if self.rng.random() < self.cfg.win_floor:
             return WIN_GOAL
         return self._subgoals[int(self.rng.integers(len(self._subgoals)))]
 
 
-def make_assigner(cfg: GoalConfig, rng: np.random.Generator | None = None) -> GoalAssigner | None:
+def make_assigner(
+    cfg: GoalConfig, rng: np.random.Generator | None = None, curriculum=None
+) -> GoalAssigner | None:
     """Factory: returns a ``GoalAssigner`` for goal modes, or ``None`` for
-    ``goal_mode == "none"`` (the caller takes the legacy vanilla path)."""
+    ``goal_mode == "none"`` (the caller takes the legacy vanilla path).
+
+    For ``goal_mode == "lp"`` pass a ``Curriculum`` built over the run's
+    persisted repertoire snapshot; absent one, the assigner falls back to the
+    ``random`` enumeration."""
     if cfg.goal_mode == "none":
         return None
-    return GoalAssigner(cfg, rng)
+    return GoalAssigner(cfg, rng, curriculum=curriculum)

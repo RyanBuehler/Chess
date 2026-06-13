@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from chessrl.config.config import RunConfig
+from chessrl.goals.repertoire import Repertoire
 from chessrl.model.network import PolicyValueNet
 from chessrl.selfplay.worker import worker_main
 from chessrl.training.buffer import GoalReplayBuffer, ReplayBuffer
@@ -33,12 +34,22 @@ def make_run_dir(cfg: RunConfig, runs_root) -> Path:
     return run_dir
 
 
-def ingest_new_games(run_dir, buffer, ingested: set, recent_records: deque | None = None) -> tuple:
+REPERTOIRE_FILE = "repertoire.json"
+
+
+def ingest_new_games(
+    run_dir, buffer, ingested: set, recent_records: deque | None = None,
+    repertoire=None,
+) -> tuple:
     """Add any .npz games not yet ingested. Returns (games_added, positions_added).
     Files that fail to load (half-written) are skipped and retried next pass.
 
     When ``recent_records`` is given (goal runs), the loaded records are also
-    appended there for the wishful-thinking thermometer (a bounded window)."""
+    appended there for the wishful-thinking thermometer (a bounded window).
+
+    When ``repertoire`` is given (lp mode, plan Task 4.3) each new record drives
+    the repertoire feedback loop: mint first-seen deltas, update assigned-goal
+    stats, spawn plateaued children. The caller persists the snapshot."""
     from chessrl.selfplay.records import GameRecord
 
     games_dir = Path(run_dir) / "games"
@@ -58,6 +69,8 @@ def ingest_new_games(run_dir, buffer, ingested: set, recent_records: deque | Non
         positions_added += len(rec)
         if recent_records is not None and rec.has_goals():
             recent_records.append(rec)
+        if repertoire is not None and rec.has_goals():
+            repertoire.update_and_refine_from_record(rec)
     return games_added, positions_added
 
 
@@ -143,6 +156,18 @@ def main(argv=None) -> Path:
         buffer = ReplayBuffer(cfg.training.buffer_size)
     # Bounded window of recent goal records for the wishful-thinking thermometer.
     recent_records: deque | None = deque(maxlen=512) if goal_mode else None
+    # LP curriculum repertoire (lp mode only): the trainer owns the canonical
+    # snapshot, mints/updates it from new games, and persists it so workers can
+    # reload it (plan Task 4.3). Resume reconstructs it from the persisted file.
+    lp_mode = cfg.goal.goal_mode == "lp"
+    repertoire = None
+    if lp_mode:
+        repertoire = Repertoire.load_or_new(
+            run_dir / REPERTOIRE_FILE,
+            lp_window=cfg.goal.lp_window,
+            deadline_max=cfg.goal.deadline_max,
+        )
+        repertoire.save(run_dir / REPERTOIRE_FILE)  # seed the snapshot for workers
     ingested: set = set()
     if args.resume:
         ckpts = sorted((run_dir / "checkpoints").glob("ckpt_*.pt"))
@@ -175,9 +200,15 @@ def main(argv=None) -> Path:
 
     try:
         while games_seen < args.games:
-            added, positions = ingest_new_games(run_dir, buffer, ingested, recent_records)
+            added, positions = ingest_new_games(
+                run_dir, buffer, ingested, recent_records, repertoire=repertoire
+            )
             games_seen += added
             total_positions += positions
+            # Persist the updated repertoire snapshot so workers reload it on
+            # their checkpoint cadence (plan Task 4.3). Atomic write.
+            if repertoire is not None and added:
+                repertoire.save(run_dir / REPERTOIRE_FILE)
 
             steps_done = 0
             n = trainer.allowed_steps(total_positions)
@@ -240,9 +271,13 @@ def main(argv=None) -> Path:
                 p.terminate()
                 p.join(timeout=10)
         # final drain of any games written during shutdown
-        added, positions = ingest_new_games(run_dir, buffer, ingested)
+        added, positions = ingest_new_games(
+            run_dir, buffer, ingested, repertoire=repertoire
+        )
         games_seen += added
         total_positions += positions
+        if repertoire is not None:
+            repertoire.save(run_dir / REPERTOIRE_FILE)
         trainer.save_checkpoint()
         (run_dir / "state.json").write_text(
             json.dumps({"games": baseline_games + games_seen, "positions": total_positions})

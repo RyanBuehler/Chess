@@ -15,6 +15,8 @@ import torch
 
 from chessrl.config.config import RunConfig
 from chessrl.goals.assignment import make_assigner
+from chessrl.goals.curriculum import Curriculum
+from chessrl.goals.repertoire import Repertoire
 from chessrl.model.network import (
     BatchedNetEvaluator,
     GoalNetEvaluator,
@@ -48,6 +50,31 @@ def _newest_checkpoint(run_dir) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
+REPERTOIRE_FILE = "repertoire.json"
+
+
+def _load_curriculum(run_dir, cfg: RunConfig):
+    """Build an LP ``Curriculum`` from the run's persisted repertoire snapshot.
+
+    Returns ``None`` for non-lp modes (the assigner falls back to random) and
+    when no snapshot exists yet (early in a fresh lp run). Workers reload this on
+    the same cadence as the net checkpoint (spec sec 14 / plan Task 4.3)."""
+    if cfg.goal.goal_mode != "lp":
+        return None
+    path = Path(run_dir) / REPERTOIRE_FILE
+    if not path.exists():
+        return None
+    rep = Repertoire.load_or_new(
+        path, lp_window=cfg.goal.lp_window, deadline_max=cfg.goal.deadline_max
+    )
+    return Curriculum(
+        rep,
+        novelty_beta=cfg.goal.novelty_beta,
+        min_attempts_for_lp=cfg.goal.min_attempts_for_lp,
+        win_floor=cfg.goal.win_floor,
+    )
+
+
 def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     """Newest checkpoint if present, else a fresh net seeded identically across
     workers so a cold-start run begins from the same weights everywhere.
@@ -69,12 +96,13 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     return BatchedNetEvaluator(net, device=device)
 
 
-def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator) -> list:
+def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator, curriculum=None) -> list:
     """Play one batch of goal-conditioned games sequentially. Returns
     list[(GameRecord, final_board, z, meta)] in the same shape as
     play_games_concurrent. Meta adds goal diagnostics: win_ply_fraction (the
-    per-game control variable, spec sec 7/16)."""
-    assigner = make_assigner(cfg.goal, rng)
+    per-game control variable, spec sec 7/16). ``curriculum`` (lp mode) is the
+    LP sampler built from the reloaded repertoire snapshot."""
+    assigner = make_assigner(cfg.goal, rng, curriculum=curriculum)
     results = []
     for _ in range(cfg.selfplay.concurrent_games):
         rec, board, z = play_goal_game(
@@ -96,13 +124,14 @@ def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator) -> list
 def run_one_batch(
     run_dir, worker_id: int, evaluator, cfg: RunConfig,
     rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
+    curriculum=None,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
     Returns the next free counter. Goal modes play games one-at-a-time via
     play_goal_game (per-side goals differ and switch over the game, so the
     single-goal batched path does not apply); vanilla uses the batched path."""
     if cfg.goal.goal_mode != "none":
-        results = _run_goal_batch(evaluator, cfg, rng)
+        results = _run_goal_batch(evaluator, cfg, rng, curriculum=curriculum)
     else:
         results = play_games_concurrent(
             evaluator, cfg.mcts, cfg.selfplay, rng,
@@ -138,6 +167,10 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     counter = next_counter_for_worker(run_dir, worker_id)
     evaluator = _build_evaluator(run_dir, cfg, resolved_device, cfg.training.seed)
     loaded_ckpt: Path | None = _newest_checkpoint(run_dir)
+    # LP curriculum snapshot (lp mode only); reloaded on the checkpoint cadence.
+    curriculum = _load_curriculum(run_dir, cfg)
+    rep_path = run_dir / REPERTOIRE_FILE
+    rep_mtime = rep_path.stat().st_mtime if rep_path.exists() else None
 
     publisher = NullPublisher()
     if cfg.selfplay.feed_port > 0:
@@ -166,9 +199,19 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                     # current net and retry on the next loop. Never crash a worker
                     # over this - spawn restarts cost 10-20s each.
                     pass
+            # Reload the repertoire snapshot when the trainer has rewritten it
+            # (lp mode). Same best-effort discipline as the checkpoint reload.
+            if cfg.goal.goal_mode == "lp" and rep_path.exists():
+                try:
+                    m = rep_path.stat().st_mtime
+                    if m != rep_mtime:
+                        curriculum = _load_curriculum(run_dir, cfg)
+                        rep_mtime = m
+                except Exception:
+                    pass
             counter = run_one_batch(
                 run_dir, worker_id, evaluator, cfg, rng, counter,
-                publisher=publisher, batch_index=batch_index,
+                publisher=publisher, batch_index=batch_index, curriculum=curriculum,
             )
             batch_index += 1
             # tight loop is fine; the sentinel check between batches paces shutdown.

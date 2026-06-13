@@ -429,3 +429,117 @@ def test_compare(server, browser):
 
         # No console or page errors throughout.
         _assert_no_console_errors(errors)
+
+
+# --------------------------------------------------------------------------- #
+# Goals — goal-diagnostics panel (Task 5.3)
+# --------------------------------------------------------------------------- #
+GOALS_PORT = 8778
+GOALS_BASE = f"http://{HOST}:{GOALS_PORT}"
+
+
+def _write_goal_run(root: Path) -> str:
+    """Create a synthetic goal-run dir with a hand-written metrics.jsonl +
+    repertoire.json so the goals panel has data to render."""
+    import json
+
+    run_id = "gp-lp-goal-synthetic"
+    rdir = root / run_id
+    (rdir / "games").mkdir(parents=True)
+    (rdir / "config.json").write_text(json.dumps({"run_name": run_id}))
+    (rdir / "state.json").write_text(json.dumps({"games": 300, "positions": 12000}))
+
+    # Three cycles of goal metrics: achievement rate, wishful-thinking, win-ply
+    # fraction, repertoire size, and per-kind learning progress.
+    rows = []
+    for i, step in enumerate((100, 200, 300)):
+        rate = {"capture": 0.30 + 0.1 * i, "win": 0.05 + 0.02 * i}
+        rows.append({
+            "games": 100 * (i + 1),
+            "step": step,
+            "policy_loss": 1.0 - 0.1 * i,
+            "value_loss": 0.5 - 0.05 * i,
+            "repertoire_size": 3 + i,
+            "win_ply_fraction": 0.25 + 0.05 * i,
+            "goal_achievement_rate": rate,
+            "learning_progress": {"capture": 0.12 - 0.02 * i, "win": 0.04 + 0.01 * i},
+            "wishful_thinking": {
+                "capture": {"self_play": rate["capture"], "vs_stockfish": 0.18,
+                            "gap": rate["capture"] - 0.18},
+                "win": {"self_play": rate["win"], "vs_stockfish": None, "gap": None},
+            },
+        })
+    (rdir / "metrics.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n"
+    )
+
+    (rdir / "repertoire.json").write_text(json.dumps({
+        "lp_window": 200, "deadline_max": 60,
+        "templates": [
+            {"kind": "win", "params": [], "deadline": 60,
+             "attempts": 50, "successes": 8, "window": [0, 0, 1, 0]},
+            {"kind": "capture", "params": [["piece_type", 5]], "deadline": 15,
+             "attempts": 40, "successes": 22, "window": [1, 0, 1, 1]},
+            {"kind": "check", "params": [], "deadline": 20,
+             "attempts": 25, "successes": 10, "window": [0, 1, 0, 1]},
+        ],
+    }))
+    return run_id
+
+
+@pytest.fixture(scope="module")
+def goal_server(tmp_path_factory):
+    """A dedicated server on its own port pointed at a temp runs root that holds
+    a synthetic goal run — keeps real runs untouched."""
+    root = tmp_path_factory.mktemp("goal_runs")
+    _write_goal_run(root)
+    app = create_app(root, cfg=_ServerCfg(), device="cpu")
+    app.state.feed_ports = []
+    srv = _Server(app, HOST, GOALS_PORT)
+    srv.start()
+    try:
+        yield GOALS_BASE
+    finally:
+        srv.stop()
+
+
+def test_goals(goal_server, browser):
+    """Goal-diagnostics panel renders all expected charts + thermometer for a
+    synthetic goal run, with zero console errors."""
+    with page_with_console(browser) as (page, errors):
+        page.set_default_timeout(30000)
+        page.goto(goal_server + "/goals.html", wait_until="networkidle")
+
+        # Run list populated; the synthetic goal run is auto-selected.
+        page.wait_for_selector("#run-list li")
+        runs = page.query_selector_all("#run-list li")
+        assert len(runs) >= 1
+
+        sel = page.inner_text("#sel-run").strip()
+        assert sel == "gp-lp-goal-synthetic", f"unexpected selected run: {sel!r}"
+
+        # All four uPlot charts draw a <canvas>.
+        page.wait_for_selector("#repertoire-chart canvas")
+        page.wait_for_selector("#rate-chart canvas")
+        page.wait_for_selector("#lp-chart canvas")
+        page.wait_for_selector("#winply-chart canvas")
+        for cid in ("repertoire-chart", "rate-chart", "lp-chart", "winply-chart"):
+            assert page.query_selector(f"#{cid} canvas") is not None, \
+                f"{cid} did not render a canvas"
+
+        # The no-goals hint must be hidden for a real goal run.
+        no_goals = page.query_selector("#no-goals")
+        assert no_goals is not None
+        assert not no_goals.is_visible(), "no-goals hint should be hidden"
+
+        # Thermometer renders one row per goal kind (capture + win => 2 rows).
+        page.wait_for_selector("#thermometer .thermo-row")
+        rows = page.query_selector_all("#thermometer .thermo-row")
+        assert len(rows) >= 2, f"expected >=2 thermometer rows, got {len(rows)}"
+
+        # Axis labels recorded for the test contract (mirror dashboard).
+        axes = page.evaluate("() => window.__chartAxes || {}")
+        assert axes.get("repertoire-chart", {}).get("y") == "repertoire size"
+        assert axes.get("winply-chart", {}).get("y") == "win-ply fraction"
+
+        _assert_no_console_errors(errors)

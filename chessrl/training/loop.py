@@ -60,6 +60,38 @@ def goal_achievement_rates(records) -> dict:
     return {k: achieved[k] / attempts[k] for k in attempts if attempts[k] > 0}
 
 
+def win_ply_fraction(records) -> float | None:
+    """Mean fraction of plies played under the active win-goal across goal
+    records (control variable, spec sec 7/16). Returns None when there are no
+    goal records (vanilla), so the metric is simply omitted."""
+    fracs = [rec.win_ply_fraction() for rec in records if rec.has_goals()]
+    if not fracs:
+        return None
+    return float(sum(fracs) / len(fracs))
+
+
+def repertoire_learning_progress(repertoire, curriculum=None) -> dict:
+    """Per-goal-kind learning-progress over a repertoire (spec sec 12/16).
+
+    For each stored template the curriculum's split-window Beta-posterior LP is
+    computed; templates sharing a kind are aggregated by taking the max LP (the
+    frontier child of that delta family). Returns ``{kind: lp}``. When no
+    curriculum is supplied a fresh one with default knobs is used so the panel
+    still has a series for non-lp goal runs that carry a repertoire."""
+    from chessrl.goals.curriculum import Curriculum
+
+    if repertoire is None:
+        return {}
+    cur = curriculum or Curriculum(repertoire)
+    out: dict = {}
+    for tmpl in repertoire.templates():
+        lp = cur.learning_progress(tmpl)
+        prev = out.get(tmpl.kind)
+        if prev is None or lp > prev:
+            out[tmpl.kind] = lp
+    return out
+
+
 def wishful_thinking_thermometer(self_play_rates: dict, stockfish_rates: dict | None = None) -> dict:
     """Assemble the thermometer metric (spec sec 11/16, plan Task 3.4).
 

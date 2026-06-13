@@ -21,7 +21,12 @@ from chessrl.goals.repertoire import Repertoire
 from chessrl.model.network import PolicyValueNet
 from chessrl.selfplay.worker import worker_main
 from chessrl.training.buffer import GoalReplayBuffer, ReplayBuffer
-from chessrl.training.loop import goal_achievement_rates, wishful_thinking_thermometer
+from chessrl.training.loop import (
+    goal_achievement_rates,
+    repertoire_learning_progress,
+    win_ply_fraction,
+    wishful_thinking_thermometer,
+)
 from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
 
@@ -328,6 +333,15 @@ def main(argv=None) -> Path:
                 sf_rates = load_stockfish_achievement_rates(run_dir)
                 metrics["goal_achievement_rate"] = sp_rates
                 metrics["wishful_thinking"] = wishful_thinking_thermometer(sp_rates, sf_rates)
+                # Observability time series (spec sec 16, Task 5.3): fraction of
+                # plies under g=win (control variable) and, when a repertoire is
+                # present (lp mode), its size + per-kind learning-progress.
+                wpf = win_ply_fraction(recent_records)
+                if wpf is not None:
+                    metrics["win_ply_fraction"] = wpf
+                if repertoire is not None:
+                    metrics["repertoire_size"] = len(repertoire.templates())
+                    metrics["learning_progress"] = repertoire_learning_progress(repertoire)
             with metrics_path.open("a") as f:
                 f.write(json.dumps(metrics) + "\n")
             # Flush counters every cycle so a hard crash (which skips finally)

@@ -55,6 +55,10 @@ def create_app(runs_root, cfg=None, device: str = "cpu") -> FastAPI:
     def get_elo(run_id: str):
         return catalog.read_jsonl(_require_run(run_id) / "elo.jsonl")
 
+    @app.get("/api/runs/{run_id}/goals")
+    def get_goal_diagnostics(run_id: str):
+        return catalog.goal_diagnostics(_require_run(run_id))
+
     @app.get("/api/runs/{run_id}/checkpoints")
     def get_checkpoints(run_id: str):
         return catalog.list_checkpoints(_require_run(run_id))

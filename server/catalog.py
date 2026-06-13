@@ -95,6 +95,100 @@ def pgn_to_moves(pgn_text: str) -> dict:
     return {"moves": moves, "result": game.headers.get("Result", "*")}
 
 
+def goal_diagnostics(rdir: Path) -> dict:
+    """Assemble the goal-run diagnostics payload (spec sec 16, Task 5.3).
+
+    Reads ``metrics.jsonl`` (per-cycle goal series) + ``repertoire.json``
+    (per-template stats) from a run dir and returns a compact, chart-ready dict:
+
+        {
+          "is_goal_run": bool,            # any goal series present at all
+          "steps": [...],                 # x-axis (training step per cycle)
+          "games": [...],                 # alt x-axis (cumulative games)
+          "repertoire_size": [...],       # per-cycle template count (or null)
+          "win_ply_fraction": [...],      # per-cycle fraction under g=win
+          "goal_kinds": [...],            # union of goal kinds seen
+          "achievement_rate": {kind: [...]},   # per-kind self-play rate per cycle
+          "learning_progress": {kind: [...]},  # per-kind LP per cycle
+          "wishful_thinking": {kind: {"self_play","vs_stockfish","gap"}},  # latest
+          "repertoire": {                 # latest repertoire snapshot
+            "size": int,
+            "templates": [{kind,params,deadline,attempts,successes,window_rate}],
+          },
+        }
+
+    Pure / read-only. Missing files degrade to empty series, never raise."""
+    metrics = read_jsonl(Path(rdir) / "metrics.jsonl")
+
+    steps: list = []
+    games: list = []
+    rep_size: list = []
+    win_frac: list = []
+    rate_by_kind: dict[str, list] = {}
+    lp_by_kind: dict[str, list] = {}
+    kinds: set[str] = set()
+    latest_wishful: dict = {}
+
+    # First pass: discover every goal kind across all cycles so each kind's
+    # per-cycle series stays aligned (null where the kind is absent that cycle).
+    for m in metrics:
+        for key in ("goal_achievement_rate", "learning_progress"):
+            block = m.get(key)
+            if isinstance(block, dict):
+                kinds.update(block.keys())
+    sorted_kinds = sorted(kinds)
+    for k in sorted_kinds:
+        rate_by_kind[k] = []
+        lp_by_kind[k] = []
+
+    any_goal = False
+    for m in metrics:
+        steps.append(m.get("step"))
+        games.append(m.get("games"))
+        rep_size.append(m.get("repertoire_size"))
+        win_frac.append(m.get("win_ply_fraction"))
+        rate = m.get("goal_achievement_rate") or {}
+        lp = m.get("learning_progress") or {}
+        if rate or lp or m.get("win_ply_fraction") is not None:
+            any_goal = True
+        for k in sorted_kinds:
+            rate_by_kind[k].append(rate.get(k))
+            lp_by_kind[k].append(lp.get(k))
+        wt = m.get("wishful_thinking")
+        if isinstance(wt, dict) and wt:
+            latest_wishful = wt
+
+    rep = _read_json(Path(rdir) / "repertoire.json", default={})
+    rep_templates = []
+    for t in rep.get("templates", []) if isinstance(rep, dict) else []:
+        attempts = int(t.get("attempts", 0) or 0)
+        window = t.get("window", []) or []
+        wrate = (sum(window) / len(window)) if window else 0.0
+        rep_templates.append({
+            "kind": t.get("kind"),
+            "params": t.get("params", []),
+            "deadline": t.get("deadline"),
+            "attempts": attempts,
+            "successes": int(t.get("successes", 0) or 0),
+            "window_rate": wrate,
+        })
+    if rep_templates:
+        any_goal = True
+
+    return {
+        "is_goal_run": any_goal,
+        "steps": steps,
+        "games": games,
+        "repertoire_size": rep_size,
+        "win_ply_fraction": win_frac,
+        "goal_kinds": sorted_kinds,
+        "achievement_rate": rate_by_kind,
+        "learning_progress": lp_by_kind,
+        "wishful_thinking": latest_wishful,
+        "repertoire": {"size": len(rep_templates), "templates": rep_templates},
+    }
+
+
 def _read_json(path: Path, default):
     p = Path(path)
     if not p.exists():

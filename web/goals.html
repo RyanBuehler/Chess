@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chessrl — goals</title>
+  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav class="topnav">
+    <span class="brand">&#9822; chessrl</span>
+    <a href="/index.html">Dashboard</a>
+    <a href="/replays.html">Replays</a>
+    <a href="/live.html">Live</a>
+    <a href="/play.html">Play</a>
+    <a href="/arena.html">Arena</a>
+    <a href="/compare.html">Compare</a>
+    <a href="/goals.html" class="active">Goals</a>
+  </nav>
+  <main>
+    <section id="runs">
+      <h2>Goal runs</h2>
+      <ul id="run-list"></ul>
+    </section>
+    <section id="charts">
+      <h2>Goal diagnostics <small id="sel-run"></small></h2>
+      <div id="refresh-indicator" class="refresh-indicator"></div>
+      <div id="no-goals" class="hint" style="display:none;">
+        (this run has no goal diagnostics — pick a goal run)
+      </div>
+      <div id="goal-panels">
+        <h3>Repertoire size over time</h3>
+        <div id="repertoire-chart" class="chart"></div>
+
+        <h3>Per-goal achievement rate</h3>
+        <div id="rate-chart" class="chart"></div>
+
+        <h3>Per-goal learning progress</h3>
+        <div id="lp-chart" class="chart"></div>
+
+        <h3>Win-ply fraction over time</h3>
+        <div id="winply-chart" class="chart"></div>
+
+        <h3>Wishful-thinking thermometer
+          <small class="muted">self-play vs. held-out achievement</small></h3>
+        <div id="thermometer"></div>
+      </div>
+    </section>
+  </main>
+  <!-- uPlot ships an IIFE build exposing window.uPlot. -->
+  <script src="/vendor/uPlot.iife.min.js"></script>
+  <script type="module" src="/goals.js"></script>
+</body>
+</html>

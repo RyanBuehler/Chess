@@ -176,3 +176,15 @@ input[type="range"] { accent-color: var(--accent); }
 .compare-table tr:hover td { background: #ffffff08; }
 .compare-table .mono { font-family: var(--mono); }
 #compare-section { grid-column: 1 / -1; }
+
+/* Goals page. */
+#charts h3 { margin: 1rem 0 .4rem; font-size: .95rem; color: var(--text); }
+.thermo-row { display: flex; align-items: center; gap: .6rem; margin: .3rem 0; }
+.thermo-label { width: 90px; font-family: var(--mono); font-size: .85rem; color: var(--muted); }
+.thermo-track {
+  position: relative; flex: 1; max-width: 380px; height: 16px;
+  background: #11121c; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+}
+.thermo-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--good); transition: width .3s; }
+.thermo-marker { position: absolute; top: -2px; width: 2px; height: 20px; background: var(--bad); }
+.thermo-val { font-family: var(--mono); font-size: .8rem; color: var(--text); min-width: 9rem; }

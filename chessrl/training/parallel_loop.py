@@ -167,9 +167,14 @@ def hung_workers(
             # First observation or progress advanced: (re)start the clock.
             last_seen[wid] = (progress, now)
             continue
-        # No advance since prev[1]; the reference time is the later of the last
-        # observed progress and when we started watching this stall.
-        ref = progress if progress is not None else prev[1]
+        # No advance since we last refreshed the clock at prev[1]; measure the
+        # stall from THERE, not from the absolute last-game mtime (which for a
+        # healthy worker mid-long-batch is far in the past and would falsely flag
+        # it, and -- because it never moves -- would re-flag every loop iteration
+        # even after a restart, causing a restart storm). prev[1] is reset to
+        # `now` on first observation, on progress advance, and on restart, so the
+        # fresh process always gets a full window before it can be judged hung.
+        ref = prev[1]
         if now - ref >= heartbeat_seconds:
             hung.append(wid)
     return hung

@@ -132,6 +132,34 @@ def test_heartbeat_disabled_never_flags(tmp_path):
     assert hung_workers(tmp_path, [0, 1], last_seen, now=1e9, heartbeat_seconds=0.0) == []
 
 
+def test_stale_last_game_does_not_cause_restart_storm(tmp_path):
+    """Regression for the 59k-restart storm: a worker whose last *completed*
+    game is far in the past (mid a long from-scratch batch, or freshly restarted
+    with a still-stale meta file) must get a FULL window measured from when we
+    start watching it -- NOT be flagged hung immediately off the ancient absolute
+    mtime, and NOT be re-flagged every call after a restart resets its clock."""
+    (tmp_path / "games").mkdir()
+    last_seen: dict = {}
+    window = 60.0
+    # The worker's only completed game is ancient (t=10), but we begin observing
+    # at t=1000 (e.g. a long batch in flight, no game completed for a while).
+    _touch_worker_game(tmp_path, 0, 0, mtime=10.0)
+    assert hung_workers(tmp_path, [0], last_seen, now=1000.0, heartbeat_seconds=window) == []
+    # 30s into the fresh window -> still healthy despite the ancient mtime (the
+    # pre-fix bug flagged it here, since now-10 >> window).
+    assert hung_workers(tmp_path, [0], last_seen, now=1030.0, heartbeat_seconds=window) == []
+    # Past the window since we started watching -> hung (once).
+    assert hung_workers(tmp_path, [0], last_seen, now=1061.0, heartbeat_seconds=window) == [0]
+    # Restart resets the clock the way parallel_loop does: (progress, now).
+    last_seen[0] = (worker_last_progress(tmp_path, 0), 1061.0)
+    # Immediately after the reset it must NOT be re-flagged (the storm bug did,
+    # every loop iteration, because it referenced the never-moving stale mtime).
+    assert hung_workers(tmp_path, [0], last_seen, now=1062.0, heartbeat_seconds=window) == []
+    assert hung_workers(tmp_path, [0], last_seen, now=1100.0, heartbeat_seconds=window) == []
+    # Only after another full window since the reset.
+    assert hung_workers(tmp_path, [0], last_seen, now=1122.0, heartbeat_seconds=window) == [0]
+
+
 def test_make_run_dir_writes_config_and_provenance(tmp_path):
     cfg = RunConfig.from_dict({"run_name": "pll"})
     run_dir = make_run_dir(cfg, runs_root=tmp_path / "runs")

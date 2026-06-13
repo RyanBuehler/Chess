@@ -125,6 +125,25 @@ deep game?
    or maintained invariants); some concepts (king safety) aren't deltas of raw features.
    Open design question: accept that ceiling for v1, or add a slot for learned predicates
    (second research frontier stacked on the first).
+
+   **v1 status (2026-06-13):** goals are minted from a *hand-enumerated* rule-level vocabulary
+   (capture-per-piece-type, check, castle, promote, reach-rank) — value-agnostic (worth is
+   learned, not assigned), and ~equivalent to "emergence" because the rule-level basis is small
+   and discrete. It is NOT yet pure dynamic discovery over the raw delta space. Kept for v1 by
+   choice; pure-emergent-over-raw-deltas was scoped to v2.
+
+   **v2 INTENTION — DO NOT LOSE SIGHT OF THIS (Ryan, 2026-06-13):** the deeper goal is to let
+   agents form goals from **ANY state delta** (the full delta-state space), and to **implicitly
+   learn which emergent deltas actually led to future goals/wins** — i.e. a learned, in-the-loop
+   *evaluation of subgoals by their contribution to downstream goals/outcomes* (credit
+   assignment over the delta space, not a hand-picked vocabulary). The point is bigger than
+   chess: both the goal *vocabulary* AND their *values* should emerge from "which state-changes
+   lead to good downstream outcomes," which orients the agent toward **exploring/structuring the
+   delta-state space itself** and makes the method **domain-general** (transfers beyond chess).
+   This is the real payoff of "from scratch, unbiased" — the rule-level v1 vocabulary is a
+   tractable stand-in. Connects to: deferred learned-predicates, win-lift (deferred to the
+   league), HER (relabel achieved deltas), and successor-features / open-ended skill-discovery
+   (which deltas are useful stepping stones). Experiment in v2; keep v1 running for now.
 3. *Verifier* — goal achievement is computable from game records (lesson 3). No learned
    discriminator needed — a usual autotelic failure surface simply absent.
 4. *LP curriculum engine* — per-goal-region success rates and derivatives, outside the net

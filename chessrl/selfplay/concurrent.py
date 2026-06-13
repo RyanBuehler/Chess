@@ -229,7 +229,7 @@ class _GoalGame:
 
     __slots__ = (
         "builder", "board", "states", "sides", "allow_resign", "resign_streak",
-        "ply", "done", "z", "tree",
+        "ply", "done", "z", "tree", "game_id",
     )
 
     def __init__(self, board: chess.Board, sides: dict, allow_resign: bool):
@@ -243,6 +243,7 @@ class _GoalGame:
         self.done = False
         self.z = 0
         self.tree = None        # the fresh per-ply search tree (rebuilt each round)
+        self.game_id = ""        # M7: stable per-game topic for the live feed
 
 
 def play_goal_games_concurrent(
@@ -253,17 +254,23 @@ def play_goal_games_concurrent(
     rng: np.random.Generator,
     num_games: int,
     assigner: GoalAssigner,
+    publisher=None,
+    game_id_prefix: str = "",
 ) -> list:
     """Play ``num_games`` goal-conditioned games concurrently, batching leaf
     evaluations across all games into ``evaluator_goal`` (a
     BatchedGoalNetEvaluator). Returns list[(GameRecord, final_board, z, meta)] in
     slot order, the SAME shape as play_games_concurrent, with goal diagnostics in
-    meta (win_ply_fraction). Reproduces play_goal_game per game exactly."""
+    meta (win_ply_fraction). Reproduces play_goal_game per game exactly. If
+    `publisher` is given, every applied move is published to the live feed under
+    the per-game topic f"{game_id_prefix}{slot}"; a terminal done=True frame is
+    published when a game ends (a pure side effect — RNG and decisions untouched)."""
+    publisher = publisher or NullPublisher()
     # One goal-mode MCTS with NO fixed goal; each tree carries its own context.
     mcts = BatchedMCTS(evaluator_goal, mcts_cfg, rng, goal_mode=True)
 
     games: list[_GoalGame] = []
-    for _ in range(num_games):
+    for slot in range(num_games):
         board = chess.Board()
         # RNG draw order matches play_goal_game exactly (allow_resign, then the
         # White-side goal, then the Black-side goal) so a single-game run is
@@ -273,7 +280,9 @@ def play_goal_games_concurrent(
             chess.WHITE: _SideGoal(assigner.assign()),
             chess.BLACK: _SideGoal(assigner.assign()),
         }
-        games.append(_GoalGame(board, sides, allow_resign))
+        g = _GoalGame(board, sides, allow_resign)
+        g.game_id = f"{game_id_prefix}{slot}"          # stable per-game topic
+        games.append(g)
 
     # Resolve any game that is already terminal / over the cap before searching.
     for g in games:
@@ -295,7 +304,7 @@ def play_goal_games_concurrent(
             mcts.step_round(trees)
 
         for g in active:
-            _play_one_goal_move(g, mcts, mcts_cfg, sp_cfg, rng)
+            _play_one_goal_move(g, mcts, mcts_cfg, sp_cfg, rng, publisher)
 
     results = []
     for g in games:
@@ -326,11 +335,12 @@ def _goal_check_pre_move_termination(g: _GoalGame, sp_cfg: SelfPlayConfig) -> No
 
 def _play_one_goal_move(
     g: _GoalGame, mcts: BatchedMCTS, mcts_cfg: MCTSConfig, sp_cfg: SelfPlayConfig,
-    rng: np.random.Generator,
+    rng: np.random.Generator, publisher,
 ) -> None:
     """One move for one game: pick (temperature/argmax), record with goal
     columns, apply the win-goal-only resignation gate, push the move, then
-    re-check the mover's goal resolution. Exact mirror of play_goal_game's body."""
+    re-check the mover's goal resolution. Exact mirror of play_goal_game's body.
+    Publishing is a PURE SIDE EFFECT mirroring _play_one_move's publish points."""
     protagonist = g.board.turn
     side = g.sides[protagonist]
 
@@ -350,6 +360,18 @@ def _play_one_goal_move(
         active_goal=side.active,
     )
 
+    # Decode the chosen move BEFORE committing (need the pre-move board context),
+    # and build top-5 (uci, visit_frac) from the root visit distribution — the
+    # same computation as the vanilla _play_one_move.
+    flip = g.board.turn == chess.BLACK
+    chosen_move = index_to_move(choice, flip, g.board)
+    total = float(counts.sum())
+    order = np.argsort(counts)[::-1][:5]
+    top_moves = [
+        [index_to_move(int(idxs[k]), flip, g.board).uci(), float(counts[k] / total)]
+        for k in order
+    ]
+
     # Resignation gate: ONLY under the win-goal (mirror of play.py; a hard
     # sub-goal's tiny achievement prob must not resign the GAME).
     if side.active.is_win():
@@ -359,6 +381,7 @@ def _play_one_goal_move(
             if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
                 g.z = -1 if protagonist == chess.WHITE else 1
                 g.done = True
+                _publish_goal_move(publisher, g, chosen_move, root_v, top_moves)
                 return
         else:
             g.resign_streak[protagonist] = 0
@@ -374,3 +397,18 @@ def _play_one_goal_move(
     _maybe_switch_to_win(side, g.states, protagonist, g.ply)
 
     _goal_check_pre_move_termination(g, sp_cfg)
+    _publish_goal_move(publisher, g, chosen_move, root_v, top_moves)
+
+
+def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_moves: list) -> None:
+    """Publish one goal-game frame mirroring _publish_move's payload schema."""
+    publisher.publish(g.game_id, {
+        "game_id": g.game_id,
+        "fen": g.board.fen(),
+        "last_move_uci": chosen_move.uci(),
+        "ply": g.ply,
+        "root_q": float(root_q),
+        "top_moves": top_moves,
+        "done": bool(g.done),
+        "z": int(g.z) if g.done else None,
+    })

@@ -192,3 +192,78 @@ def test_concurrent_single_game_matches_sequential_always_win():
     assert con_z == seq_z
     assert con_board.fen() == seq_board.fen()
     assert _records_equal(con_rec, seq_rec)
+
+
+# --------------------------------------------------------------------------
+# Live feed: the goal concurrent driver publishes frames (the gap this fixes).
+# --------------------------------------------------------------------------
+class _CapturingPublisher:
+    """Stub publisher that records every published (topic, payload) frame."""
+
+    def __init__(self):
+        self.frames = []
+
+    def publish(self, game_id, payload):
+        self.frames.append((game_id, payload))
+
+    def close(self):
+        return
+
+
+def test_concurrent_goal_emits_live_feed_frames():
+    cfg_goal = GoalConfig(goal_mode="random", win_floor=0.0, deadline_max=4)
+    mcts_cfg = MCTSConfig(simulations=4, temperature_moves=2, leaves_per_tree=1)
+    sp_cfg = SelfPlayConfig(ply_cap=12, resign_playout_fraction=0.0)
+    rng = np.random.default_rng(123)
+    assigner = make_assigner(cfg_goal, rng)
+
+    pub = _CapturingPublisher()
+    results = play_goal_games_concurrent(
+        _BatchedGoalEvaluator(), mcts_cfg, sp_cfg, cfg_goal, rng,
+        num_games=2, assigner=assigner,
+        publisher=pub, game_id_prefix="wtest_b0_",
+    )
+    assert len(results) == 2
+
+    # The driver published at least one frame per game.
+    assert pub.frames, "goal concurrent driver emitted no live-feed frames"
+    topics = {topic for topic, _ in pub.frames}
+    assert topics == {"wtest_b0_0", "wtest_b0_1"}, topics
+
+    # Every frame carries the live-feed schema fields.
+    for topic, payload in pub.frames:
+        assert payload["game_id"] == topic
+        assert isinstance(payload["fen"], str) and payload["fen"]
+        assert isinstance(payload["last_move_uci"], str) and payload["last_move_uci"]
+        assert "ply" in payload and "root_q" in payload and "top_moves" in payload
+
+    # Each game produces a terminal done=True frame as its last frame.
+    for slot in ("wtest_b0_0", "wtest_b0_1"):
+        game_frames = [p for t, p in pub.frames if t == slot]
+        assert game_frames, f"no frames for {slot}"
+        assert game_frames[-1]["done"] is True, f"no terminal frame for {slot}"
+        assert game_frames[-1]["z"] in (-1, 0, 1)
+
+
+def test_publisher_does_not_perturb_results():
+    """Publishing is a pure side effect: results are identical with/without a
+    publisher under a matched seed (RNG and decisions untouched)."""
+    cfg_goal = GoalConfig(goal_mode="random", win_floor=0.3, deadline_max=6)
+    mcts_cfg = MCTSConfig(simulations=16, temperature_moves=4, leaves_per_tree=1)
+    sp_cfg = SelfPlayConfig(ply_cap=24, resign_playout_fraction=0.0)
+
+    rng_a = np.random.default_rng(555)
+    res_a = play_goal_games_concurrent(
+        _BatchedGoalEvaluator(), mcts_cfg, sp_cfg, cfg_goal, rng_a,
+        num_games=2, assigner=make_assigner(cfg_goal, rng_a),
+    )
+    rng_b = np.random.default_rng(555)
+    res_b = play_goal_games_concurrent(
+        _BatchedGoalEvaluator(), mcts_cfg, sp_cfg, cfg_goal, rng_b,
+        num_games=2, assigner=make_assigner(cfg_goal, rng_b),
+        publisher=_CapturingPublisher(), game_id_prefix="x_",
+    )
+    for (ra, ba, za, _), (rb, bb, zb, _) in zip(res_a, res_b):
+        assert za == zb
+        assert ba.fen() == bb.fen()
+        assert _records_equal(ra, rb)

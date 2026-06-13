@@ -99,19 +99,25 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     return BatchedNetEvaluator(net, device=device)
 
 
-def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator, curriculum=None) -> list:
+def _run_goal_batch(
+    evaluator, cfg: RunConfig, rng: np.random.Generator, curriculum=None,
+    publisher=None, game_id_prefix: str = "",
+) -> list:
     """Play one batch of goal-conditioned games CONCURRENTLY, batching leaf
     evaluations across all in-flight games/sides into one BatchedGoalNetEvaluator
     call per search round (spec sec 7/10). Returns list[(GameRecord, final_board,
     z, meta)] in the same shape as play_games_concurrent. Meta adds goal
     diagnostics: win_ply_fraction (the per-game control variable, spec sec 7/16).
     ``curriculum`` (lp mode) is the LP sampler built from the reloaded repertoire
-    snapshot. Each game reproduces play_goal_game's semantics exactly."""
+    snapshot. Each game reproduces play_goal_game's semantics exactly. ``publisher``
+    and ``game_id_prefix`` thread the live feed through, mirroring the vanilla path."""
     assigner = make_assigner(cfg.goal, rng, curriculum=curriculum)
     return play_goal_games_concurrent(
         evaluator, cfg.mcts, cfg.selfplay, cfg.goal, rng,
         num_games=cfg.selfplay.concurrent_games,
         assigner=assigner,
+        publisher=publisher,
+        game_id_prefix=game_id_prefix,
     )
 
 
@@ -121,11 +127,16 @@ def run_one_batch(
     curriculum=None,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
-    Returns the next free counter. Goal modes play games one-at-a-time via
-    play_goal_game (per-side goals differ and switch over the game, so the
-    single-goal batched path does not apply); vanilla uses the batched path."""
+    Returns the next free counter. Both goal and vanilla modes play the batch
+    CONCURRENTLY (many games advanced in lockstep through one batched MCTS): goal
+    modes via play_goal_games_concurrent, vanilla via play_games_concurrent. Both
+    thread the live-feed publisher and per-game id prefix through."""
     if cfg.goal.goal_mode != "none":
-        results = _run_goal_batch(evaluator, cfg, rng, curriculum=curriculum)
+        results = _run_goal_batch(
+            evaluator, cfg, rng, curriculum=curriculum,
+            publisher=publisher,
+            game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
+        )
     else:
         results = play_games_concurrent(
             evaluator, cfg.mcts, cfg.selfplay, rng,

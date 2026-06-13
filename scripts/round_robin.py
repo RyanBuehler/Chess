@@ -14,11 +14,12 @@ and it picks up exactly where each arm's persisted game count left off. Arms
 already at budget are skipped; when every arm is at budget the orchestrator
 exits.
 
-Each arm runs from its own ``experiments/*.yaml`` (distinct feed-port ranges)
-and writes to a run dir whose name is the arm's ``run_name``. The first time an
-arm is touched it must already have a resumable run dir (created by launching
-the YAML once); the orchestrator only resumes -- it does not create runs (so a
-mistyped arm name fails loudly rather than silently spawning a fresh run).
+Each arm runs from its own ``experiments/<arm>.yaml`` (distinct feed-port
+ranges) and writes to a run dir named EXACTLY after the arm (no timestamp). The
+orchestrator is create-on-first-touch: an arm whose ``runs/<arm>`` lacks
+``config.json`` is launched FRESH (``--config experiments/<arm>.yaml
+--run-dir-name <arm>``) for its first slice; thereafter it is resumed
+(``--resume <arm>``). So ``python scripts/round_robin.py`` works out of the box.
 
 Usage:
   python scripts/round_robin.py                          # defaults: 4 arms -> 30k, 1k/round
@@ -62,17 +63,35 @@ def next_target(current: int, budget: int, round_size: int) -> int | None:
     return min(current + round_size, budget)
 
 
-def build_resume_cmd(
-    arm: str, target: int, runs_root: str, python_exe: str
+def arm_yaml(arm: str) -> str:
+    """The experiment YAML for an arm, by convention ``experiments/<arm>.yaml``."""
+    return f"experiments/{arm}.yaml"
+
+
+def has_run(runs_root: Path, arm: str) -> bool:
+    """True once an arm's run dir has been initialized (``config.json`` written
+    by a fresh launch). Used to decide create-on-first-touch vs resume."""
+    return (Path(runs_root) / arm / "config.json").exists()
+
+
+def build_slice_cmd(
+    arm: str, current: int, target: int, runs_root: str, python_exe: str
 ) -> list[str]:
-    """The trainer command that resumes ``arm`` until it has ``target`` total
-    games. ``--games`` is the trainer's TOTAL-new-games-this-invocation budget;
-    the slice size is target-current, computed by the caller."""
-    return [
-        python_exe, "-u", "scripts/train.py", "--parallel",
-        "--resume", arm, "--runs-root", runs_root,
-        "--games", str(target),
-    ]
+    """The trainer command that advances ``arm`` by one slice. ``--games`` is the
+    trainer's NEW-games-THIS-invocation budget, so it must be the slice size
+    ``target - current`` (NOT the cumulative target). ``next_target`` still
+    returns the cumulative target for progress logic; only the value passed to
+    ``--games`` is the slice.
+
+    First touch (no ``config.json`` under ``runs_root/arm``): launch FRESH from
+    ``experiments/<arm>.yaml`` with ``--run-dir-name <arm>`` so the run dir is
+    created under the bare arm name (no timestamp). Otherwise ``--resume``."""
+    slice_games = target - current
+    base = [python_exe, "-u", "scripts/train.py", "--parallel",
+            "--runs-root", runs_root, "--games", str(slice_games)]
+    if has_run(runs_root, arm):
+        return base + ["--resume", arm]
+    return base + ["--config", arm_yaml(arm), "--run-dir-name", arm]
 
 
 def plan_round(
@@ -94,12 +113,13 @@ def plan_round(
 
 
 def advance_arm(
-    arm: str, target: int, runs_root: Path, python_exe: str, runner=None
+    arm: str, current: int, target: int, runs_root: Path, python_exe: str, runner=None
 ) -> int:
-    """Resume one arm for a single slice up to ``target`` total games. Returns
-    the subprocess return code. ``runner`` is injectable for tests (default:
-    subprocess.run from the repo root)."""
-    cmd = build_resume_cmd(arm, target, str(runs_root), python_exe)
+    """Advance one arm by a single slice from ``current`` up to ``target`` total
+    games (slice size = target-current). Creates the run on first touch, else
+    resumes. Returns the subprocess return code. ``runner`` is injectable for
+    tests (default: subprocess.run from the repo root)."""
+    cmd = build_slice_cmd(arm, current, target, str(runs_root), python_exe)
     if runner is None:
         proc = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parent.parent))
         return proc.returncode
@@ -135,8 +155,8 @@ def round_robin(
             break  # every arm at budget
         if max_rounds is not None and rounds >= max_rounds:
             break
-        for arm, _current, target in plan:
-            rc = advance_arm(arm, target, runs_root, python_exe, runner=runner)
+        for arm, current, target in plan:
+            rc = advance_arm(arm, current, target, runs_root, python_exe, runner=runner)
             launched.append((arm, target))
             if rc != 0:
                 # A failed slice: report and stop rather than hammering a broken

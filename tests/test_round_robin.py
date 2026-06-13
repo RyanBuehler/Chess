@@ -22,13 +22,27 @@ def _write_state(runs_root: Path, arm: str, games: int) -> None:
     (d / "state.json").write_text(json.dumps({"games": games, "positions": games * 40}))
 
 
+def _arm_of(cmd) -> str:
+    """The arm name from a slice command: ``--resume <arm>`` on a resume, or
+    ``--run-dir-name <arm>`` on a fresh first-touch launch."""
+    if "--resume" in cmd:
+        return cmd[cmd.index("--resume") + 1]
+    return cmd[cmd.index("--run-dir-name") + 1]
+
+
 def _stub_runner(runs_root: Path):
-    """A fake trainer: parses ``--resume <arm> ... --games <target>`` and bumps
-    that arm's state.json to the target (as the real trainer would on success)."""
+    """A fake trainer: ``--games`` is the SLICE size (new games this invocation,
+    NOT a cumulative target), so it ADDS that to the arm's state.json -- exactly
+    as the real trainer advances ``baseline_games + games_seen``. On first touch
+    the arm is launched fresh (``--config``/``--run-dir-name``); we also drop a
+    ``config.json`` so the next round sees it as resumable."""
     def runner(cmd):
-        arm = cmd[cmd.index("--resume") + 1]
-        target = int(cmd[cmd.index("--games") + 1])
-        _write_state(runs_root, arm, target)
+        arm = _arm_of(cmd)
+        slice_games = int(cmd[cmd.index("--games") + 1])
+        d = runs_root / arm
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text("{}")
+        _write_state(runs_root, arm, read_games(d) + slice_games)
         return 0
     return runner
 

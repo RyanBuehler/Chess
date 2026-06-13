@@ -31,8 +31,20 @@ from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
 
 
-def make_run_dir(cfg: RunConfig, runs_root) -> Path:
-    run_dir = Path(runs_root) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+def make_run_dir(cfg: RunConfig, runs_root, run_dir_name: str | None = None) -> Path:
+    """Create a fresh run dir. By default ``runs_root/<run_name>-<timestamp>``.
+    When ``run_dir_name`` is given the dir is named EXACTLY that (no timestamp),
+    so an orchestrator can address an arm by its bare name; an existing dir is a
+    hard error (we must never silently resume on top of a fresh launch)."""
+    if run_dir_name is not None:
+        run_dir = Path(runs_root) / run_dir_name
+        if run_dir.exists():
+            raise SystemExit(
+                f"--run-dir-name {run_dir_name!r}: {run_dir} already exists; "
+                f"refusing to overwrite. Use --resume {run_dir_name} to continue it."
+            )
+    else:
+        run_dir = Path(runs_root) / f"{cfg.run_name}-{time.strftime('%Y%m%d-%H%M%S')}"
     (run_dir / "games").mkdir(parents=True)
     (run_dir / "config.json").write_text(cfg.to_json())
     (run_dir / "provenance.json").write_text(json.dumps(build_provenance(cfg), indent=2))
@@ -182,6 +194,7 @@ def main(argv=None) -> Path:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="YAML config path (new run)")
     ap.add_argument("--resume", help="run directory name under runs-root")
+    ap.add_argument("--run-dir-name", help="for a fresh --config run, name the run dir EXACTLY this (no timestamp); errors if it exists")
     ap.add_argument("--runs-root", default="runs")
     ap.add_argument("--games", type=int, default=200, help="total NEW games this invocation")
     args = ap.parse_args(argv)
@@ -194,7 +207,7 @@ def main(argv=None) -> Path:
         baseline_games = state["games"]
     else:
         cfg = RunConfig.from_yaml(args.config) if args.config else RunConfig()
-        run_dir = make_run_dir(cfg, args.runs_root)
+        run_dir = make_run_dir(cfg, args.runs_root, run_dir_name=args.run_dir_name)
         total_positions = 0
         baseline_games = 0
 

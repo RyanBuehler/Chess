@@ -1,22 +1,83 @@
 """Single-process train loop (M4): generate -> pace -> train -> checkpoint.
-This module IS the smoke pipeline; scripts/train.py is a thin wrapper."""
+This module IS the smoke pipeline; scripts/train.py is a thin wrapper.
+
+Also hosts the **wishful-thinking thermometer** (spec sec 11/16, plan Task 3.4):
+per goal kind, the self-play achievement rate and (when held-out vs-Stockfish
+data is present) the self-play-minus-Stockfish achievement gap — a pre-registered
+optimism diagnostic.
+"""
 import argparse
 import json
 import random
 import time
+from collections import defaultdict
 from pathlib import Path
 
+import chess
 import chess.pgn
 import numpy as np
 import torch
 
 from chessrl.config.config import RunConfig
+from chessrl.goals.verifier import achieved_by_deadline
 from chessrl.model.network import NetEvaluator, PolicyValueNet
 from chessrl.selfplay.pgn_io import save_pgn
 from chessrl.selfplay.play import play_game
+from chessrl.selfplay.records import GameRecord, deserialize_goal
 from chessrl.training.buffer import ReplayBuffer
+from chessrl.training.her import reconstruct_states
 from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
+
+
+def goal_achievement_rates(records) -> dict:
+    """Per-goal-kind self-play achievement rate over a set of goal records.
+
+    For each side of each game, take the side's *assigned* goal and ask the
+    verifier whether it was achieved by its deadline (start_ply == 0, the side's
+    pursuit origin). Aggregate (achieved, attempts) per goal kind. Vanilla (no
+    goals) records are skipped. Returns ``{kind: rate}`` over kinds attempted.
+    """
+    achieved = defaultdict(int)
+    attempts = defaultdict(int)
+    for rec in records:
+        if not rec.has_goals():
+            continue
+        states = reconstruct_states(rec)
+        # The assigned goal is immutable per side; read it off each side's first
+        # ply (White at ply 0, Black at ply 1). Fall back gracefully on short games.
+        seen = {}
+        for t in range(len(rec)):
+            proto = chess.WHITE if rec.protagonist[t] == 1 else chess.BLACK
+            if proto in seen:
+                continue
+            goal = deserialize_goal(str(rec.assigned_blob[t]))
+            seen[proto] = (t, goal)
+        for proto, (start_ply, goal) in seen.items():
+            ok, _ = achieved_by_deadline(states, goal, proto, start_ply)
+            attempts[goal.kind] += 1
+            achieved[goal.kind] += 1 if ok else 0
+    return {k: achieved[k] / attempts[k] for k in attempts if attempts[k] > 0}
+
+
+def wishful_thinking_thermometer(self_play_rates: dict, stockfish_rates: dict | None = None) -> dict:
+    """Assemble the thermometer metric (spec sec 11/16, plan Task 3.4).
+
+    Returns ``{kind: {"self_play": rate, "vs_stockfish": rate|None,
+    "gap": rate|None}}``. The gap (self-play minus held-out vs-Stockfish
+    achievement rate) flags optimism; it is only populated where vs-Stockfish
+    data is present for that kind.
+    """
+    out = {}
+    sf = stockfish_rates or {}
+    for kind, sp in self_play_rates.items():
+        vs = sf.get(kind)
+        out[kind] = {
+            "self_play": sp,
+            "vs_stockfish": vs,
+            "gap": (sp - vs) if vs is not None else None,
+        }
+    return out
 
 
 def main(argv=None) -> Path:

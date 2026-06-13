@@ -136,6 +136,15 @@ class GoalNetEvaluator:
         self.net = net.to(device)
         self.device = device
 
+    @classmethod
+    def from_checkpoint(
+        cls, path, network_cfg: NetworkConfig, device: str = "cpu"
+    ) -> "GoalNetEvaluator":
+        net = PolicyValueNet(network_cfg, goal_conditioned=True)
+        ckpt = torch.load(Path(path), map_location=device)
+        net.load_state_dict(ckpt["model"])
+        return cls(net, device=device)
+
     @torch.no_grad()
     def evaluate(self, board: chess.Board, goal, remaining: int, protagonist: bool):
         self.net.eval()

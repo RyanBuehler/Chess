@@ -14,9 +14,15 @@ import numpy as np
 import torch
 
 from chessrl.config.config import RunConfig
-from chessrl.model.network import BatchedNetEvaluator, PolicyValueNet
+from chessrl.goals.assignment import make_assigner
+from chessrl.model.network import (
+    BatchedNetEvaluator,
+    GoalNetEvaluator,
+    PolicyValueNet,
+)
 from chessrl.selfplay.concurrent import play_games_concurrent
 from chessrl.selfplay.pgn_io import save_pgn
+from chessrl.selfplay.play import play_goal_game
 
 
 def next_counter_for_worker(run_dir, worker_id: int) -> int:
@@ -42,10 +48,20 @@ def _newest_checkpoint(run_dir) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int) -> BatchedNetEvaluator:
+def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     """Newest checkpoint if present, else a fresh net seeded identically across
-    workers so a cold-start run begins from the same weights everywhere."""
+    workers so a cold-start run begins from the same weights everywhere.
+
+    Returns a BatchedNetEvaluator for vanilla (goal_mode=none), or a
+    GoalNetEvaluator (single-position, goal-conditioned net) for goal modes."""
+    goal_mode = cfg.goal.goal_mode != "none"
     ckpt = _newest_checkpoint(run_dir)
+    if goal_mode:
+        if ckpt is not None:
+            return GoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
+        torch.manual_seed(seed)
+        net = PolicyValueNet(cfg.network, goal_conditioned=True)
+        return GoalNetEvaluator(net, device=device)
     if ckpt is not None:
         return BatchedNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
     torch.manual_seed(seed)
@@ -53,18 +69,47 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int) -> Batched
     return BatchedNetEvaluator(net, device=device)
 
 
+def _run_goal_batch(evaluator, cfg: RunConfig, rng: np.random.Generator) -> list:
+    """Play one batch of goal-conditioned games sequentially. Returns
+    list[(GameRecord, final_board, z, meta)] in the same shape as
+    play_games_concurrent. Meta adds goal diagnostics: win_ply_fraction (the
+    per-game control variable, spec sec 7/16)."""
+    assigner = make_assigner(cfg.goal, rng)
+    results = []
+    for _ in range(cfg.selfplay.concurrent_games):
+        rec, board, z = play_goal_game(
+            evaluator, cfg.mcts, cfg.selfplay, cfg.goal, rng, assigner
+        )
+        meta = {
+            "plies": len(rec),
+            "z": z,
+            "resigned": False,
+            "playout": False,
+            "would_resign": False,
+            "fp": False,
+            "win_ply_fraction": rec.win_ply_fraction(),
+        }
+        results.append((rec, board, z, meta))
+    return results
+
+
 def run_one_batch(
-    run_dir, worker_id: int, evaluator: BatchedNetEvaluator, cfg: RunConfig,
+    run_dir, worker_id: int, evaluator, cfg: RunConfig,
     rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
-    Returns the next free counter."""
-    results = play_games_concurrent(
-        evaluator, cfg.mcts, cfg.selfplay, rng,
-        num_games=cfg.selfplay.concurrent_games,
-        publisher=publisher,
-        game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
-    )
+    Returns the next free counter. Goal modes play games one-at-a-time via
+    play_goal_game (per-side goals differ and switch over the game, so the
+    single-goal batched path does not apply); vanilla uses the batched path."""
+    if cfg.goal.goal_mode != "none":
+        results = _run_goal_batch(evaluator, cfg, rng)
+    else:
+        results = play_games_concurrent(
+            evaluator, cfg.mcts, cfg.selfplay, rng,
+            num_games=cfg.selfplay.concurrent_games,
+            publisher=publisher,
+            game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
+        )
     games_dir = Path(run_dir) / "games"
     meta_path = Path(run_dir) / f"games_meta_w{worker_id:02d}.jsonl"
     counter = start_counter
@@ -107,9 +152,14 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
             newest = _newest_checkpoint(run_dir)
             if newest is not None and newest != loaded_ckpt:
                 try:
-                    evaluator = BatchedNetEvaluator.from_checkpoint(
-                        newest, cfg.network, device=resolved_device
-                    )
+                    if cfg.goal.goal_mode != "none":
+                        evaluator = GoalNetEvaluator.from_checkpoint(
+                            newest, cfg.network, device=resolved_device
+                        )
+                    else:
+                        evaluator = BatchedNetEvaluator.from_checkpoint(
+                            newest, cfg.network, device=resolved_device
+                        )
                     loaded_ckpt = newest
                 except Exception:
                     # Half-written or vanishing checkpoint: keep playing with the

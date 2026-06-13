@@ -105,6 +105,59 @@ def aggregate_resign_fp(run_dir) -> dict:
     return {"playout_games": playout, "false_positives": fp, "resign_fp_rate": rate}
 
 
+def worker_last_progress(run_dir, worker_id: int) -> float | None:
+    """Most recent moment worker ``worker_id`` produced a game, as a unix
+    timestamp, or None if it has produced nothing yet (Task 5.2).
+
+    A worker appends one line to ``games_meta_w{WW}.jsonl`` and writes a
+    ``game_w{WW}_*.npz`` per game; the max mtime across both is the worker's
+    heartbeat. The meta file is the primary signal (always appended, even for
+    zero-position games); the newest game .npz is a fallback before the first
+    meta flush."""
+    run_dir = Path(run_dir)
+    mtimes = []
+    meta = run_dir / f"games_meta_w{worker_id:02d}.jsonl"
+    if meta.exists():
+        mtimes.append(meta.stat().st_mtime)
+    prefix = f"game_w{worker_id:02d}_"
+    for f in (run_dir / "games").glob(f"{prefix}*.npz"):
+        try:
+            mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+    return max(mtimes) if mtimes else None
+
+
+def hung_workers(
+    run_dir, worker_ids, last_seen: dict, now: float, heartbeat_seconds: float
+) -> list[int]:
+    """Return the ids of workers that are *hung*: alive but with no new game in
+    the heartbeat window (Task 5.2).
+
+    ``last_seen`` maps worker_id -> (progress_ts_or_None, observed_at_ts) and is
+    mutated in place: when a worker's progress timestamp advances we refresh its
+    observation; a worker is hung only when its progress has NOT advanced for
+    longer than ``heartbeat_seconds``. Workers with no output yet are timed from
+    when we first observed them (so a worker that never starts producing is also
+    caught). ``heartbeat_seconds <= 0`` disables detection (returns [])."""
+    if heartbeat_seconds <= 0:
+        return []
+    hung = []
+    for wid in worker_ids:
+        progress = worker_last_progress(run_dir, wid)
+        prev = last_seen.get(wid)
+        if prev is None or prev[0] != progress:
+            # First observation or progress advanced: (re)start the clock.
+            last_seen[wid] = (progress, now)
+            continue
+        # No advance since prev[1]; the reference time is the later of the last
+        # observed progress and when we started watching this stall.
+        ref = progress if progress is not None else prev[1]
+        if now - ref >= heartbeat_seconds:
+            hung.append(wid)
+    return hung
+
+
 def _spawn_worker(ctx, worker_id, run_dir, stop_path, device):
     p = ctx.Process(
         target=worker_main,
@@ -195,6 +248,10 @@ def main(argv=None) -> Path:
     metrics_path = run_dir / "metrics.jsonl"
     games_seen = 0
     restarts = 0
+    hung_restarts = 0
+    # Per-worker heartbeat state for the hung-worker watchdog (Task 5.2).
+    heartbeat_seconds = getattr(cfg.selfplay, "worker_heartbeat_seconds", 0.0)
+    last_seen: dict = {}
     last_ckpt_bucket = trainer.step // cfg.training.checkpoint_every_steps
     start = time.time()
 
@@ -226,13 +283,30 @@ def main(argv=None) -> Path:
             else:
                 m = {"policy_loss": None, "value_loss": None, "step": trainer.step}
 
-            # restart any dead worker
+            # restart any dead OR hung worker. A hung worker is alive but has
+            # produced no new game within the heartbeat window; left running it
+            # silently halves an arm's throughput (spec sec 14, Task 5.2).
+            now = time.time()
+            hung = set(hung_workers(
+                run_dir, range(len(procs)), last_seen, now, heartbeat_seconds
+            ))
             for i, p in enumerate(procs):
-                if not p.is_alive():
-                    procs[i] = _spawn_worker(
-                        ctx, i, run_dir, stop_path, cfg.training.selfplay_device
-                    )
-                    restarts += 1
+                dead = not p.is_alive()
+                if not dead and i not in hung:
+                    continue
+                if not dead:
+                    # Terminate the stuck process before respawning so we don't
+                    # leak it; it may be wedged in a non-returning call.
+                    p.terminate()
+                    p.join(timeout=10)
+                    hung_restarts += 1
+                procs[i] = _spawn_worker(
+                    ctx, i, run_dir, stop_path, cfg.training.selfplay_device
+                )
+                restarts += 1
+                # Reset this worker's heartbeat clock so the fresh process gets a
+                # full window before it can be judged hung again.
+                last_seen[i] = (worker_last_progress(run_dir, i), now)
 
             elapsed = max(time.time() - start, 1e-9)
             fp_stats = aggregate_resign_fp(run_dir)
@@ -246,6 +320,7 @@ def main(argv=None) -> Path:
                 "value_loss": m.get("value_loss"),
                 "games_per_hour": games_seen / elapsed * 3600.0,
                 "worker_restarts": restarts,
+                "worker_hung_restarts": hung_restarts,
                 "resign_fp_rate": fp_stats["resign_fp_rate"],
             }
             if goal_mode and recent_records:

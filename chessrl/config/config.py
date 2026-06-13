@@ -35,6 +35,7 @@ class SelfPlayConfig:
     workers: int = 4                     # M5: number of self-play worker processes
     concurrent_games: int = 32           # M5: concurrent game trees per worker batch
     feed_port: int = 0                   # M7: live-feed base PUB port (0 = disabled, no zmq). Worker w binds feed_port + w.
+    worker_heartbeat_seconds: float = 600.0  # Task 5.2: restart a worker that is alive but has produced no new game within this window (0 disables hung detection)
 
 
 @dataclass(frozen=True)

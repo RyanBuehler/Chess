@@ -204,7 +204,7 @@ class GoalNetMCTSPlayer:
     ):
         from chessrl.config.config import MCTSConfig
         from chessrl.goals.templates import WIN_GOAL
-        from chessrl.mcts.reference import GoalMCTS
+        from chessrl.mcts.reference import GoalReferenceMCTS
         from chessrl.model.network import GoalNetEvaluator
 
         self.name = name
@@ -212,7 +212,7 @@ class GoalNetMCTSPlayer:
             checkpoint_path, network_cfg, device=device
         )
         self._cfg = MCTSConfig(simulations=simulations)
-        self._mcts = GoalMCTS(self._eval, self._cfg, rng=np.random.default_rng(seed))
+        self._mcts = GoalReferenceMCTS(self._eval, self._cfg, rng=np.random.default_rng(seed))
         self._goal = WIN_GOAL
 
     def play(self, board: chess.Board) -> chess.Move:

@@ -157,3 +157,27 @@ def test_nodes_rung_does_not_hang(tmp_path):
     # second play), all bounded by timeout_s each. Total wall time is bounded;
     # 10 seconds is far below "hang forever" but generous enough for slow CI.
     assert elapsed < 10.0, f"play() took {elapsed:.1f}s — engine may have hung"
+
+
+def test_goal_net_mcts_player_constructs_and_plays(tmp_path):
+    """Non-stub coverage of the real GoalNetMCTSPlayer eval path: build a tiny
+    goal-conditioned checkpoint, construct the player (exercises the real
+    GoalReferenceMCTS import), and play one legal ply under g=win. Guards the
+    production eval factory that the stubbed eval_sweep test bypasses."""
+    import torch
+
+    from chessrl.config.config import NetworkConfig
+    from chessrl.evaluation.players import GoalNetMCTSPlayer
+    from chessrl.model.network import PolicyValueNet
+
+    cfg = NetworkConfig(blocks=1, filters=8)
+    net = PolicyValueNet(cfg, goal_conditioned=True)
+    ckpt = tmp_path / "goal_ckpt.pt"
+    torch.save({"model": net.state_dict()}, ckpt)
+
+    player = GoalNetMCTSPlayer(
+        name="gp", checkpoint_path=ckpt, network_cfg=cfg, simulations=8, seed=0
+    )
+    board = chess.Board()
+    move = player.play(board)
+    assert move in board.legal_moves

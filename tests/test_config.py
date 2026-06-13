@@ -1,4 +1,7 @@
 import json
+
+import pytest
+
 from chessrl.config.config import RunConfig
 
 
@@ -31,3 +34,40 @@ def test_json_round_trip(tmp_path):
     cfg2 = RunConfig.from_json(p)
     assert cfg2 == cfg
     assert json.loads(cfg.to_json())["run_name"] == "rt"
+
+
+def test_goal_config_defaults_and_modes():
+    from chessrl.config.config import GoalConfig
+    g = GoalConfig()
+    assert g.goal_mode == "none"                 # vanilla default
+    assert g.win_floor == 0.2
+    assert g.lp_window == 200
+    assert g.novelty_beta > 0
+    assert GoalConfig(goal_mode="lp").goal_mode == "lp"
+    with pytest.raises(ValueError):
+        GoalConfig(goal_mode="bogus")            # validated in __post_init__
+
+
+def test_goal_config_wired_into_runconfig():
+    cfg = RunConfig()
+    assert cfg.goal.goal_mode == "none"
+    assert cfg.goal.win_floor == 0.2
+
+
+def test_goal_config_yaml_override(tmp_path):
+    p = tmp_path / "exp.yaml"
+    p.write_text("goal:\n  goal_mode: lp\n  win_floor: 0.3\n")
+    cfg = RunConfig.from_yaml(p)
+    assert cfg.goal.goal_mode == "lp"
+    assert cfg.goal.win_floor == 0.3
+    assert cfg.goal.lp_window == 200              # untouched default survives
+
+
+def test_goal_config_json_round_trip(tmp_path):
+    from chessrl.config.config import GoalConfig
+    cfg = RunConfig(run_name="g", goal=GoalConfig(goal_mode="random", win_floor=0.25))
+    p = tmp_path / "config.json"
+    p.write_text(cfg.to_json())
+    cfg2 = RunConfig.from_json(p)
+    assert cfg2 == cfg
+    assert cfg2.goal.goal_mode == "random"

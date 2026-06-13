@@ -62,6 +62,20 @@ class EvalConfig:
 
 
 @dataclass(frozen=True)
+class GoalConfig:
+    goal_mode: str = "none"          # none | always_win | random | lp
+    win_floor: float = 0.2           # min fraction of games assigned g=win
+    lp_window: int = 200             # attempts in the LP window
+    novelty_beta: float = 1.0        # weight of the novelty bonus
+    min_attempts_for_lp: int = 20    # gate LP on attempt count
+    deadline_max: int = 60           # cap on goal deadline horizon (plies)
+
+    def __post_init__(self):
+        if self.goal_mode not in ("none", "always_win", "random", "lp"):
+            raise ValueError(f"bad goal_mode {self.goal_mode}")
+
+
+@dataclass(frozen=True)
 class RunConfig:
     run_name: str = "default"
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -69,6 +83,7 @@ class RunConfig:
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    goal: GoalConfig = field(default_factory=GoalConfig)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "RunConfig":
@@ -81,6 +96,7 @@ class RunConfig:
             selfplay=build(SelfPlayConfig, "selfplay"),
             training=build(TrainingConfig, "training"),
             eval=build(EvalConfig, "eval"),
+            goal=build(GoalConfig, "goal"),
         )
 
     @classmethod

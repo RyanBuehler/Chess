@@ -65,6 +65,23 @@ def test_provenance_network_values_match_config():
     assert net["archetype"] == "resnet-4x32"
 
 
+def test_provenance_records_goal_block():
+    cfg = RunConfig()
+    goal = build_provenance(cfg)["goal"]
+    assert "goal_mode" in goal
+    assert "win_floor" in goal
+    assert "lp_window" in goal
+
+
+def test_provenance_goal_values_match_config():
+    from chessrl.config.config import GoalConfig
+    cfg = RunConfig(goal=GoalConfig(goal_mode="lp", win_floor=0.3, lp_window=150))
+    goal = build_provenance(cfg)["goal"]
+    assert goal["goal_mode"] == "lp"
+    assert goal["win_floor"] == 0.3
+    assert goal["lp_window"] == 150
+
+
 # ---------------------------------------------------------------------------
 # REST endpoint tests: GET /api/runs/{run_id}/provenance
 # ---------------------------------------------------------------------------

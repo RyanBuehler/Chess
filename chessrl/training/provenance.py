@@ -55,4 +55,17 @@ def build_provenance(cfg: RunConfig) -> dict:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "network": _network_info(cfg.network),
+        "goal": _goal_info(cfg.goal),
+    }
+
+
+def _goal_info(goal_cfg) -> dict:
+    """Build the goal provenance sub-dict so goal arms are self-describing."""
+    return {
+        "goal_mode": goal_cfg.goal_mode,
+        "win_floor": goal_cfg.win_floor,
+        "lp_window": goal_cfg.lp_window,
+        "novelty_beta": goal_cfg.novelty_beta,
+        "min_attempts_for_lp": goal_cfg.min_attempts_for_lp,
+        "deadline_max": goal_cfg.deadline_max,
     }

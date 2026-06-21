@@ -81,3 +81,56 @@ def test_planes_mode_unchanged():
     x = torch.zeros(2, NUM_PLANES + GOAL_PLANES, 8, 8)
     logits, value = net(x, deadline=torch.zeros(2, 1))
     assert logits.shape == (2, 4672) and value.shape == (2, 1)
+
+
+import numpy as np
+import chess
+from chessrl.chess_env.encoding import encode_board, to_model_input
+from chessrl.model.network import VectorGoalNetEvaluator
+
+
+def _planes(n=3):
+    b = chess.Board()
+    return np.stack([to_model_input(encode_board(b)) for _ in range(n)]).astype(np.float32)
+
+
+def test_evaluator_requires_vector_net():
+    bad = PolicyValueNet(NetworkConfig(blocks=2, filters=16))  # planes default
+    with pytest.raises(AssertionError):
+        VectorGoalNetEvaluator(bad)
+
+
+def test_evaluate_planes_shapes():
+    net = PolicyValueNet(_CFG, goal_conditioned=True)
+    ev = VectorGoalNetEvaluator(net)
+    n, d = 3, _CFG.filters
+    pol, val = ev.evaluate_planes(_planes(n), np.zeros((n, d), np.float32), np.zeros(n, np.float32))
+    assert pol.shape == (n, 4672) and val.shape == (n,)
+    assert val.min() >= 0.0 and val.max() <= 1.0
+
+
+def test_embed_boards_shape():
+    net = PolicyValueNet(_CFG, goal_conditioned=True)
+    ev = VectorGoalNetEvaluator(net)
+    e = ev.embed_boards([chess.Board(), chess.Board()])
+    assert e.shape == (2, _CFG.filters)
+
+
+def test_win_value_uses_win_vector():
+    net = PolicyValueNet(_CFG, goal_conditioned=True)
+    ev = VectorGoalNetEvaluator(net)
+    n = 2
+    wv = ev.win_value(_planes(n), np.zeros(n, np.float32))
+    # equals evaluate_planes under the net's win_vector broadcast
+    win_vecs = np.broadcast_to(net.win_vector.detach().numpy(), (n, _CFG.filters)).copy()
+    _, val = ev.evaluate_planes(_planes(n), win_vecs, np.zeros(n, np.float32))
+    assert np.allclose(wv, val, atol=1e-5)
+
+
+def test_empty_batch():
+    net = PolicyValueNet(_CFG, goal_conditioned=True)
+    ev = VectorGoalNetEvaluator(net)
+    pol, val = ev.evaluate_planes(
+        np.zeros((0, 21, 8, 8), np.float32), np.zeros((0, _CFG.filters), np.float32), np.zeros(0, np.float32)
+    )
+    assert pol.shape[0] == 0 and val.shape[0] == 0

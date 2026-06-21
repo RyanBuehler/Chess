@@ -390,3 +390,58 @@ class BatchedGoalNetEvaluator:
         planes = np.concatenate([board_planes, goal_planes.astype(np.float32)], axis=0)[None]
         policies, values = self.evaluate_planes(planes, np.asarray([remaining], dtype=np.float32))
         return policies[0], float(values[0])
+
+
+class VectorGoalNetEvaluator:
+    """Batched evaluator for the vector (FiLM) goal-conditioned net (v2).
+
+    Conditions on a goal *vector* (cluster centroid) plus the deadline scalar,
+    instead of goal planes. Also exposes ``embed_boards`` (the frozen-encoder
+    embedding e(s) Plan 2 clusters) and ``win_value`` (the head under the
+    reserved learned ``win_vector``)."""
+
+    def __init__(self, net: "PolicyValueNet", device: str = "cpu"):
+        assert getattr(net, "goal_cond", "none") == "vector", \
+            "VectorGoalNetEvaluator requires a vector goal-conditioned net"
+        self.device = device
+        self.net = net.to(device)
+        self.net.eval()
+
+    @classmethod
+    def from_checkpoint(cls, path, network_cfg: NetworkConfig, device: str = "cpu") -> "VectorGoalNetEvaluator":
+        net = PolicyValueNet(network_cfg, goal_conditioned=True)
+        ckpt = torch.load(Path(path), map_location=device)
+        net.load_state_dict(ckpt["model"])
+        return cls(net, device=device)
+
+    @torch.no_grad()
+    def evaluate_planes(self, planes_batch: np.ndarray, goal_vecs: np.ndarray, deadlines: np.ndarray):
+        n = planes_batch.shape[0]
+        d = self.net.win_vector.shape[0]
+        if n == 0:
+            return (np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
+                    np.zeros((0,), dtype=np.float32))
+        x = torch.from_numpy(planes_batch).to(self.device)
+        gv = torch.from_numpy(np.asarray(goal_vecs, dtype=np.float32).reshape(n, d)).to(self.device)
+        dl = torch.tensor(_scale_deadlines(deadlines).reshape(-1, 1), dtype=torch.float32, device=self.device)
+        logits, value = self.net(x, deadline=dl, goal_vec=gv)
+        policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
+        values = value.squeeze(1).cpu().numpy().astype(np.float32)
+        return policies, values
+
+    @torch.no_grad()
+    def embed_boards(self, boards: list) -> np.ndarray:
+        if not boards:
+            return np.zeros((0, self.net.win_vector.shape[0]), dtype=np.float32)
+        x = torch.from_numpy(np.stack([to_model_input(encode_board(b)) for b in boards])).to(self.device)
+        return self.net.embed(x).cpu().numpy().astype(np.float32)
+
+    @torch.no_grad()
+    def win_value(self, planes_batch: np.ndarray, deadlines: np.ndarray) -> np.ndarray:
+        n = planes_batch.shape[0]
+        d = self.net.win_vector.shape[0]
+        if n == 0:
+            return np.zeros((0,), dtype=np.float32)
+        win_vecs = self.net.win_vector.detach().cpu().numpy().reshape(1, d).repeat(n, axis=0)
+        _, values = self.evaluate_planes(planes_batch, win_vecs, deadlines)
+        return values

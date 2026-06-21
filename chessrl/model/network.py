@@ -40,12 +40,37 @@ class ResBlock(nn.Module):
         return torch.relu(x + y)
 
 
+class FiLM(nn.Module):
+    """Maps a goal-conditioning vector to per-channel (gamma, beta) affine params.
+
+    Final layer initialized to zero so the initial modulation is the identity
+    (gamma=0, beta=0 -> h*(1+0)+0 == h), which keeps early training stable."""
+
+    def __init__(self, in_dim: int, channels: int, hidden: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 2 * channels),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, h, cond):
+        gamma, beta = self.net(cond).chunk(2, dim=1)
+        g = gamma.unsqueeze(-1).unsqueeze(-1)
+        b = beta.unsqueeze(-1).unsqueeze(-1)
+        return h * (1.0 + g) + b
+
+
 class PolicyValueNet(nn.Module):
     def __init__(self, cfg: NetworkConfig, goal_conditioned: bool = False):
         super().__init__()
         self.goal_conditioned = goal_conditioned
         ch = cfg.filters
-        in_planes = NUM_PLANES + GOAL_PLANES if goal_conditioned else NUM_PLANES
+        in_planes = NUM_PLANES
+        if goal_conditioned and cfg.goal_cond == "planes":
+            in_planes = NUM_PLANES + GOAL_PLANES
         self.stem = nn.Sequential(
             nn.Conv2d(in_planes, ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(ch),
@@ -53,11 +78,23 @@ class PolicyValueNet(nn.Module):
         )
         self.tower = nn.Sequential(*[ResBlock(ch) for _ in range(cfg.blocks)])
         self.policy_conv = nn.Conv2d(ch, 73, 1)  # AZ-style conv head, NOT flatten->FC
-        if goal_conditioned:
-            # Value head reduces the conv features, then concatenates the
-            # deadline scalar at the first Linear, and ends in sigmoid (an
-            # achievement probability in [0,1], spec sec 8). Split into a conv
-            # body + an FC head so the scalar can be cat'd between them.
+        self.goal_cond = cfg.goal_cond if goal_conditioned else "none"
+        d = ch  # embedding dim == filters (GAP of trunk)
+        if goal_conditioned and cfg.goal_cond == "vector":
+            # FiLM conditioning from (centroid d ⊕ deadline scalar).
+            self.win_vector = nn.Parameter(torch.zeros(d))
+            self.film = FiLM(in_dim=d + 1, channels=ch)
+            self.value_head = nn.Sequential(
+                nn.Conv2d(ch, 8, 1),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(8 * 64, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Sigmoid(),
+            )
+        elif goal_conditioned:  # "planes" (legacy v1) — UNCHANGED
             self.value_body = nn.Sequential(
                 nn.Conv2d(ch, 8, 1),
                 nn.BatchNorm2d(8),
@@ -65,12 +102,12 @@ class PolicyValueNet(nn.Module):
                 nn.Flatten(),
             )
             self.value_fc = nn.Sequential(
-                nn.Linear(8 * 64 + 1, 64),   # +1 for the deadline side-input
+                nn.Linear(8 * 64 + 1, 64),
                 nn.ReLU(),
                 nn.Linear(64, 1),
                 nn.Sigmoid(),
             )
-        else:
+        else:  # vanilla — UNCHANGED
             self.value_head = nn.Sequential(
                 nn.Conv2d(ch, 8, 1),
                 nn.BatchNorm2d(8),
@@ -82,11 +119,27 @@ class PolicyValueNet(nn.Module):
                 nn.Tanh(),
             )
 
-    def forward(self, x, deadline=None):
+    def embed(self, x):
+        """Global-average-pooled trunk features (B, filters): the frozen-encoder
+        embedding e(s) that Plan 2 clusters into goals."""
         h = self.tower(self.stem(x))
-        # (B,73,rank,file) -> (B,rank,file,73) -> flat, so index = square*73 + type
+        return h.mean(dim=(2, 3))
+
+    def forward(self, x, deadline=None, goal_vec=None):
+        h = self.tower(self.stem(x))
+        if self.goal_cond == "vector":
+            if goal_vec is None:
+                raise ValueError("vector goal-conditioned net requires goal_vec")
+            if deadline is None:
+                deadline = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+            if deadline.dim() == 1:
+                deadline = deadline.unsqueeze(1)
+            cond = torch.cat([goal_vec.to(h.dtype), deadline.to(h.dtype)], dim=1)
+            h = self.film(h, cond)
+            logits = self.policy_conv(h).permute(0, 2, 3, 1).flatten(1)
+            return logits, self.value_head(h)
         logits = self.policy_conv(h).permute(0, 2, 3, 1).flatten(1)
-        if self.goal_conditioned:
+        if self.goal_cond == "planes":
             if deadline is None:
                 raise ValueError("goal-conditioned net requires a deadline scalar")
             feat = self.value_body(h)

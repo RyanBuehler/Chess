@@ -23,10 +23,13 @@ subordinate to winning via potential-based shaping.*
 - **No goal→goal graph** (Stage 2). Win-value is per-goal vs the win outcome only.
 - **No manager/controller, no multi-goal plans** (Stage 3). One goal per side per game, as in v1.
 - **No continuous latent goal selection** (Stage 4). Goals are discretized clusters.
-- **No trunk redesign / no new heads.** Reuse the existing trunk + `V(s,win)` head + goal head
-  `V_goal(s,g)`. One small addition is unavoidable (see "Goal conditioning" below): a
-  goal-conditioning pathway, because embedding-space cluster goals cannot be fed as board planes
-  the way v1 fed goal-kinds. This changes the network shape → new `provenance.json`.
+- **No trunk redesign / no new heads.** Reuse the existing trunk and the existing **single
+  goal-conditioned value head**. CRITICAL (from reading v1 `network.py`): the goal-conditioned net
+  has exactly ONE value head — a *sigmoid* meaning `P(achieve goal)`. There is **no separate
+  `V(s,win)` head**; "win-value" is that same head evaluated with `g = WIN`. So `V(s,win) ≡
+  net(s, g=win)` and the goal value `V_goal(s,g) ≡ net(s, g)` are the *same head*, two different
+  goal inputs. What DOES change: the goal-conditioning *interface* (see "Goal conditioning"),
+  which alters the network shape → new `provenance.json`.
 
 What changes vs v1: **goal discovery** (no hardcoded vocabulary), **causal win-valuation**, and the
 **means-end objective**. Everything else (one goal per side, switch-to-win on resolve, HER buffer,
@@ -47,23 +50,46 @@ A **goal** is a target cluster in the value net's learned state-delta space.
 - **Discretization:** maintain a reservoir of recent `Δ` vectors and fit **online k-means**
   (default `K = 48` clusters). Centroids `{c_1…c_K}` are the discovered goal codes. Re-fit every
   `refresh_every` games (default 2000). Cluster membership is by nearest centroid.
-- **Achievement test:** goal `g = c_k` is *achieved at ply t* iff
-  `argmin_j ‖Δ(s_t) − c_j‖ == k` AND `‖Δ(s_t) − c_k‖ ≤ τ` (default `τ` = median intra-cluster
-  radius at last refit), within the goal window/deadline. Resolution (achieved OR deadline) switches
-  the active goal to WIN, preserving v1's "every game ends win-directed."
+- **Encoder versioning — FROZEN SNAPSHOT (decision, 2026-06-19).** The embedding `e(·)` used to
+  *define and cluster* goals comes from a **frozen snapshot** of the trunk, NOT the live training
+  net. Goals are defined and clustered in that frozen embedding for an *epoch*; at each
+  `refresh_every` the snapshot is re-taken from the current net and clusters are re-fit. This makes
+  the goal space **stationary within an epoch** — HER targets are well-defined, achievement is
+  reproducible, and non-stationarity becomes a discrete, controlled re-fit rather than per-step
+  drift (the live-encoder alternative, where goals drift every gradient step, is deferred to Stage
+  4). The frozen encoder snapshot is persisted to the run dir and reloaded on resume.
+- **Achievement test (replaces the predicate verifiers):** goal `g = c_k` is *achieved at ply t*
+  iff `argmin_j ‖Δ(s_t) − c_j‖ == k` AND `‖Δ(s_t) − c_k‖ ≤ τ` (default `τ` = median intra-cluster
+  radius at last refit), within the goal window/deadline. This is a **new verification path that
+  replaces** v1's board-predicate verifiers (`chessrl/goals/verifier.py`, `features.py`,
+  `_goal_achieved`) for discovered goals — a cluster centroid has no board-predicate meaning. The
+  **WIN goal keeps a real game-outcome check** (it is not a cluster). Resolution (achieved OR
+  deadline) switches the active goal to WIN, preserving v1's "every game ends win-directed."
 
 This **replaces `_CANDIDATE_KINDS`** entirely. Clusters can be labelled post-hoc (inspect member
 positions) for the UI/research read, but the agent never sees a hand-named category.
 
 ### Goal conditioning (how `g` reaches the net)
 
-v1 fed the goal to the net as **board planes** (target squares etc. for hand-named kinds). Cluster
-goals live in *embedding* space and have no board-plane rendering, so Stage 1 conditions via a
-**vector pathway** instead: the goal's centroid `c_k ∈ R^d` is projected by a small MLP and
-injected into the trunk output via **FiLM** (feature-wise affine modulation) before the policy and
-`V_goal` heads. This is the one new sub-module. `V(s,win)` reads the *unconditioned* trunk output
-(winning is goal-agnostic); policy and `V_goal` read the conditioned features. The old goal-plane
-input channels are removed. Network shape changes → record in `provenance.json`.
+v1 fed the goal to the net as **board planes** (`GOAL_PLANES` = spatial mask + piece-type + kind
+one-hots) plus a **deadline scalar** at the value FC, routed through `encode_goal`,
+`GoalNetEvaluator`, and `BatchedGoalNetEvaluator`. Cluster goals live in *embedding* space and have
+no board-plane rendering, so Stage 1 **replaces that entire interface** with a **vector pathway**:
+the goal's centroid `c_k ∈ R^d` (concatenated with the scaled deadline scalar) is projected by a
+small MLP and injected into the trunk output via **FiLM** (feature-wise affine modulation) before
+the policy and value heads. This touches every evaluator that currently builds goal planes — they
+switch from `(board_planes ⊕ goal_planes, deadline)` to `(board_planes, goal_vector)`.
+
+There is one (single) value head; it is **always goal-conditioned**. `V(s,win)` is simply that head
+under the **reserved WIN goal vector** `c_win` (a dedicated fixed vector, e.g. all-zeros or a
+learned win embedding — NOT a cluster), and `V_goal(s,g)` is the same head under `c_g`.
+
+**Coexistence (not in-place removal).** The vector pathway is added as a **new conditioning mode**
+(`goal_cond="vector"`) alongside v1's existing `planes` mode, rather than ripping `GOAL_PLANES` out.
+Rationale: vanilla and the v1 goal arms must stay runnable so their Elo-vs-games curves remain the
+comparison baselines (success is curve-vs-curve). v2 selects `vector`; v1 keeps `planes`. The
+legacy planes path is removed only once v1 arms are retired (out of scope here). The v2 net shape
+differs from v1 → record in `provenance.json`.
 
 ### Causal per-goal win-value (de-confounded)
 
@@ -81,14 +107,17 @@ Stage 1 estimates win-value **interventionally**:
 
 ### Means-end objective
 
-While a side is assigned goal `g`:
+While a side is assigned goal `g` (recall: one head, so both quantities below are that head under
+different goal vectors — `V(s,win) = net(s, c_win)`, `V_goal(s,g) = net(s, c_g)`):
 
-- **RL value target = `V(s, win)`** (protagonist win-value). Default `α = 0`: winning is the
-  objective, always. Resignation gate **on**.
+- **RL value target = `V(s, win)` = `net(s, c_win)`** (protagonist win-value). Default `α = 0`:
+  winning is the objective, always. Resignation gate **on**.
 - **Potential-based shaping** adds reward `F = γ_shape · (Φ(s′; g) − Φ(s; g))` with potential
-  `Φ(s; g) = V_goal(s, g)` (the goal head). By the potential-based-shaping theorem this cannot make
+  `Φ(s; g) = V_goal(s, g) = net(s, c_g)`. By the potential-based-shaping theorem this cannot make
   the agent sacrifice the game for the goal — it only accelerates credit toward goal progress.
-  Default `γ_shape = 0.25` (× the per-step discount, standard PBS form).
+  Default `γ_shape = 0.25` (× the per-step discount, standard PBS form). **Cost:** computing both
+  `net(s,c_win)` and `net(s,c_g)` is two value evaluations of the one head per shaped step; batch
+  them in one forward (stack the two goal vectors) to keep it ~1 forward.
 - **α-blend knob (for sweeps):** the training value target is
   `(1−α)·V(s,win) + α·V_goal(s,g)`. `α = 1` reproduces v1 speedrunning; `α = 0` is pure
   means-end. The α=1→0 sweep is the core mechanistic experiment.
@@ -111,8 +140,9 @@ novelty/LP).
 | `chessrl/goals/assignment.py` | modify | ε-Bernoulli explore branch + curriculum sample. |
 | `chessrl/goals/curriculum.py` | modify | add `γ·win_value(g)` term. |
 | `chessrl/goals/repertoire.py` | retire/bypass | `_CANDIDATE_KINDS` no longer the goal source. |
-| network module (`chessrl/nn/…`) | modify | FiLM goal-conditioning pathway (centroid→MLP→affine on trunk output); drop goal-plane inputs. |
-| self-play objective (`chessrl/selfplay/…`) | modify | win-value target + PBS shaping + α knob; gate on. |
+| `chessrl/goals/verifier.py`, `features.py`, `encoding.py` | retire/bypass for clusters | predicate verifiers + `GOAL_PLANES` replaced by centroid-distance achievement + vector conditioning (WIN keeps a real outcome check). |
+| `chessrl/model/network.py` | modify | FiLM goal-conditioning from `(centroid ⊕ deadline)` vector; remove `GOAL_PLANES` input channels; one sigmoid head stays; reserved `c_win`. Update `GoalNetEvaluator`/`BatchedGoalNetEvaluator` to the vector interface. |
+| self-play objective (`chessrl/selfplay/…`) | modify | `V(s,win)=net(s,c_win)` target + PBS shaping `Φ=net(s,c_g)` (batch the two goal vectors) + α knob; gate on. |
 | `experiments/v2-stage1.yaml` | **new** | `goal_mode: emergent`, ε/K/α/γ_shape config. |
 | eval/UI | small add | render cluster-id + win-value in the live aux; backfill vanilla curve. |
 
@@ -173,8 +203,9 @@ vanilla.**
 - `assignment`: ε-Bernoulli rate over many draws; explore picks uniform over live clusters.
 - shaping: PBS form; net shaping = 0 along a constant-`Φ` trajectory; α=0 target equals `V(win)`,
   α=1 equals `V_goal`.
-- conditioning: `V(s,win)` output is invariant to the goal input; policy and `V_goal` outputs vary
-  with the goal centroid (FiLM actually conditions).
+- conditioning: the single value head's output varies with the goal vector (FiLM actually
+  conditions — `net(s,c_a) ≠ net(s,c_b)` for distinct centroids); `net(s,c_win)` is stable for the
+  reserved win vector; forward accepts `(board_planes, goal_vector)` with no `GOAL_PLANES` channels.
 - Integration: a short smoke run produces clusters, explore games, non-trivial win-values, and a
   rising metric, without crashing on resume.
 - UI: live aux renders cluster-id + win-value (Playwright slow gate, per project rule).

@@ -69,15 +69,20 @@ class EvalConfig:
 
 @dataclass(frozen=True)
 class GoalConfig:
-    goal_mode: str = "none"          # none | always_win | random | lp
+    goal_mode: str = "none"          # none | always_win | random | lp | emergent
     win_floor: float = 0.2           # min fraction of games assigned g=win
     lp_window: int = 200             # attempts in the LP window
     novelty_beta: float = 1.0        # weight of the novelty bonus
     min_attempts_for_lp: int = 20    # gate LP on attempt count
     deadline_max: int = 60           # cap on goal deadline horizon (plies)
+    cluster_k: int = 48              # k-means cluster count = discovered goal vocabulary size
+    refresh_every: int = 2000        # games between frozen-encoder re-snapshot + re-fit
+    reservoir_size: int = 20000      # capacity of the delta reservoir
+    min_reservoir: int = 5000        # deltas required before the goal space is "ready"
+    goal_window: int = 8             # plies over which a state-delta is measured
 
     def __post_init__(self):
-        if self.goal_mode not in ("none", "always_win", "random", "lp"):
+        if self.goal_mode not in ("none", "always_win", "random", "lp", "emergent"):
             raise ValueError(f"bad goal_mode {self.goal_mode}")
 
 

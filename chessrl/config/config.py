@@ -12,6 +12,11 @@ import yaml
 class NetworkConfig:
     blocks: int = 6
     filters: int = 64
+    goal_cond: str = "planes"   # planes (v1) | vector (v2 FiLM centroid conditioning)
+
+    def __post_init__(self):
+        if self.goal_cond not in ("planes", "vector"):
+            raise ValueError(f"bad goal_cond {self.goal_cond}")
 
 
 @dataclass(frozen=True)

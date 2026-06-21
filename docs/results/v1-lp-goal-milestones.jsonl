@@ -1,0 +1,2 @@
+{"run": "gp-lp-goal", "target_games": 2000, "step": 1909, "games": 2048, "elo": 482.20847283655206, "sims": 200, "games_per_rung": 4}
+{"run": "gp-lp-goal", "target_games": 5000, "step": 4545, "games": 4992, "elo": 286.0758915116521, "sims": 200, "games_per_rung": 20}

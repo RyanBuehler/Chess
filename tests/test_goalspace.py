@@ -1,6 +1,7 @@
 # tests/test_goalspace.py
 import numpy as np
 import chess
+from pathlib import Path
 from chessrl.config.config import GoalConfig
 from chessrl.goals.goalspace import GoalSpace
 
@@ -80,3 +81,25 @@ def test_observe_uses_embedder_delta():
     b1 = chess.Board(); b1.push_san("e4")
     gs.observe(b0, b1)
     assert len(gs.reservoir) == 1
+
+
+def test_save_load_roundtrip(tmp_path):
+    gs = GoalSpace(_cfg(), FakeEmbedder(), np.random.default_rng(0))
+    rng = np.random.default_rng(7)
+    for grp in ([10, 0, 0, 0], [0, 10, 0, 0], [0, 0, 10, 0]):
+        for _ in range(20):
+            gs.observe_delta(np.array(grp, np.float32) + rng.normal(0, 0.1, 4).astype(np.float32))
+    gs.fit()
+    probe = np.array([10, 0, 0, 0], np.float32)
+    gid_before = gs.assign(probe)
+    tau_before = gs.tau
+
+    gs.save(tmp_path / "goalspace")
+    gs2 = GoalSpace.load(tmp_path / "goalspace", _cfg(), FakeEmbedder(), np.random.default_rng(99))
+
+    assert gs2.ready is True
+    assert gs2.n_clusters == gs.n_clusters
+    assert np.allclose(gs2.centroids, gs.centroids)
+    assert gs2.tau == tau_before
+    assert gs2.assign(probe) == gid_before
+    assert len(gs2.reservoir) == len(gs.reservoir)

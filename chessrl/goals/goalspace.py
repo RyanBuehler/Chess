@@ -9,6 +9,9 @@ VectorGoalNetEvaluator in production; a fake in tests) and is treated as frozen
 within an epoch; maybe_refresh() swaps in a fresh snapshot and re-fits."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import chess
 import numpy as np
 
@@ -84,3 +87,29 @@ class GoalSpace:
         if self.assign(d) != goal_id:
             return False
         return bool(np.linalg.norm(d - self.centroids[goal_id]) <= self.tau)
+
+    # --- persistence --------------------------------------------------------
+    def save(self, path) -> None:
+        d = Path(path)
+        d.mkdir(parents=True, exist_ok=True)
+        np.save(d / "centroids.npy", self.centroids if self.centroids is not None
+                else np.zeros((0, self.d), np.float32))
+        np.save(d / "reservoir.npy", self.reservoir.array())
+        meta = {"d": self.d, "tau": self.tau, "cluster_k": self.cfg.cluster_k,
+                "last_refresh_epoch": self._last_refresh_epoch, "seen": self.reservoir.seen}
+        (d / "meta.json").write_text(json.dumps(meta))
+
+    @classmethod
+    def load(cls, path, cfg: GoalConfig, embedder, rng: np.random.Generator) -> "GoalSpace":
+        d = Path(path)
+        meta = json.loads((d / "meta.json").read_text())
+        gs = cls(cfg, embedder, rng)
+        res_arr = np.load(d / "reservoir.npy")
+        for row in res_arr:
+            gs.reservoir.add(row)
+        gs.reservoir.seen = int(meta["seen"])
+        cents = np.load(d / "centroids.npy")
+        gs.centroids = cents if cents.shape[0] > 0 else None
+        gs.tau = float(meta["tau"])
+        gs._last_refresh_epoch = int(meta["last_refresh_epoch"])
+        return gs

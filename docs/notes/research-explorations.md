@@ -256,3 +256,141 @@ Roadmap shape: **2 → 3 → merge into 1**; 4 and 5 are league expansions; 6–
   running. As of 2026-06-12 18:20 — 9,696 games (19% of 50k target), step ~10,000, latest Elo
   661 (noisy: 742/482/661 on last three evals). Roughly tracking baseline's curve at the same
   game count so far; the bet is on a higher plateau, not a faster start. Watch on /compare.html.
+
+---
+
+## v2 — goal→win valuation & hierarchy: investigation plan (2026-06-14)
+
+**Motivating concern (Ryan):** v1 trains *flat, learnability-selected goal speedruns*. During a
+sub-goal a side maximizes `P(achieve delta by deadline)` with the resignation gate OFF and zero
+regard for winning; goals are ends, not means, and there is no hierarchy. Risk: a strong
+delta-*speedrunner* that is a weak *player*. The intended system treats goals as **subgoals →
+bigger goals → winning**, where a goal's value flows down from `P(win)` and we learn *which
+deltas matter, and when*. v1 stays the premise test (does undirected practice transfer to Elo,
+measured post-hoc?); the items below are the directed/hierarchical successor.
+
+### A — observational goal→win analysis (DONE 2026-06-14, `scripts/analyze_goal_win.py`)
+800 lp-goal games, 1600 side-games, base win-rate 0.473.
+- **L1 (assigned sub-goal achieved vs missed → win):** lifts are *small* — capture +0.05,
+  check +0.04, reach_rank +0.01, castle ~0 (n_ach=2), **promote +0.12** (lone standout); win
+  +1.00 is the tautology sanity-check (achieving "win" ⟺ winning, confirms data wiring). The
+  confound *inflates* these, so the causal contribution of achieving most sub-goals is plausibly
+  ~0. **The worry, in data: hitting the self-set sub-goal barely changes win-prob.**
+- **L2 (delta achieved in phase → win-rate vs base):** structure IS present and phase-dependent
+  — top: promote/reach-7 midgame +0.15 (collinear: reach-7 ⇒ promote), capture-Q midgame +0.13,
+  check endgame +0.12 vs check opening ~0; bottom: capture-P endgame −0.13, castle midgame −0.16.
+  Some deltas in some phases track winning strongly (queen capture / promotion midgame, checks
+  late); early pawn captures/checks are neutral.
+- **CONFOUND (hard):** the winning side has initiative and achieves more of everything → lift ≠
+  causation. Descriptive only (matches graveyard "pure observational goal statistics").
+- **Takeaway:** flat speedrun goals are mostly win-neutral (worry confirmed), BUT real,
+  phase-structured goal→win signal exists for a directed curriculum / credit model to exploit.
+
+### B — interventional goal valuation (de-confound A)
+- Randomize a fraction ε of assignments (bypass the LP curriculum → uniform goal) so
+  achieving-vs-not is no longer selected by position strength; then `P(win | do(assign g))` and
+  `P(win | do(assign g) ∧ achieved)` are *causal* per-goal win-lifts. Stratify by phase;
+  bootstrap CIs.
+- Build: an "explore" assignment branch (Bernoulli ε) in `GoalAssigner`/`Curriculum.sample`;
+  assigned+achieved+outcome are already logged. Cost: ε of self-play goes off-curriculum (small
+  exploration tax). This is the graveyard "RCT insight — goal assignment makes the statistics
+  interventional," made concrete.
+
+### C — credit model over the delta trajectory ("which deltas mattered, when")
+- Tokenize each game as an ordered sequence of (delta, ply-bucket, side) events; train a small
+  transformer to predict outcome z; read attention/attribution → a *learned* delta-importance-
+  by-phase map capturing order/interactions (vs A's marginal correlations). "Deltas as tokens"
+  (queue #6 / graveyard temporal-transformer).
+- Offline first: runs on the existing corpus, no training change, no search. Still observational
+  (predicts, not intervenes) → pair with B for causality; mind co-authored-delta / wishful
+  thinking (lesson 2).
+
+### D — win-value-weighted curriculum + reward shaping
+- With a per-goal win-value from B/C, extend the sampler to **`w(g) = LP + β·novelty +
+  γ·win_value(g)`** so practice biases toward goals that *matter*, not just learnable ones.
+- And/or potential-based reward shaping: credit a delta by the `ΔV(s, win)` it produced (reuse
+  the existing win value head) so achieving a delta that *worsens* the position isn't rewarded.
+  First real bend of v1 toward means-end without a full hierarchy.
+
+### Destination — hierarchical / means-end goals
+- B→C→D are stepping stones; the structural fix is a hierarchy (feudal/options): a higher level
+  proposes a subgoal, a lower level achieves it, and the subgoal's value bootstraps from its
+  parent down to `P(win)`. That makes goals genuinely "subgoals to bigger goals to winning."
+
+### Sequencing
+A (done) → C offline (free, existing corpus) → B (data-collection change, de-confounds) → D
+(fold valuation into curriculum) → hierarchy (v2 redesign). Keep the v1 sequential run finishing
+as the falsification baseline.
+
+---
+
+## v2 ROADMAP (2026-06-19): staged means-end / emergent-goal plan
+
+**Approved direction (Ryan).** This supersedes the A/B/C/D *sequencing* above by folding those
+items into a staged build; A's findings and B/C/D's mechanisms all survive, re-slotted as stages.
+
+**The vision, one sentence:** goals are *emergent state-deltas* discovered from play, each
+trainable to pursue and valued by how much it raises `P(achieving other goals → ultimately
+winning)`, composed into plans where the agent learns *which subgoals carried the parent* — with
+as little hand-specification as possible. Ryan's list, verbatim: goals = state deltas; new goals
+discovered through play; goals trainable; goals composable of subgoals (model learns which
+subgoals contributed most); ideally nothing hard-coded; agent learns which goals improve chances
+of accomplishing other goals, recursively, until one or more *plans* to achieve the end goal —
+winning.
+
+**Lineage to the literature** (this is open-ended hierarchical RL, unsolved in adversarial
+self-play domains): Feudal Networks (manager picks goals in a learned space, worker achieves
+them); **Director** (Hafner 2022 — goals as codes in a world-model *latent*, discovered not
+hardcoded); HER (learn from achieved deltas as goals). Each piece exists individually; nobody has
+them working *together* under self-play. The plan's job is to de-risk, not assume.
+
+**Core principle — EARN YOUR EMERGENCE.** Everything in the vision pulls toward maximal emergence
+(continuous latent goals + emergent hierarchy + emergent credit, all at once) — which is exactly
+the configuration that fails *silently* (degenerate goals that look fine but teach nothing). So
+emergence increases ONE stage at a time, and **every stage is a working system falsifiable
+against Elo** before the next builds on it. The vision is the destination; the only debate is
+order.
+
+**Falsification baseline (v1 result, 2026-06-14):** lp-goal@5k Elo ≈ **286** vs vanilla@5k ≈
+**~700** (666–754). Flat, learnability-selected goal *speedruns* cost ~400 Elo — they do NOT
+transfer to strength. v2 must beat vanilla, not just beat v1.
+
+### Stage 0 — machinery viability (IN FLIGHT)
+always-win@5k vs vanilla@5k. Gate: is the goal-conditioning apparatus itself (goal planes,
+`V(s,g)` head, HER buffer) Elo-neutral? Every stage below reuses it; if it leaks ~300 Elo, fix
+the net before anything else. (random-goal arm dropped — v2 replaces flat goal-sampling anyway.)
+
+### Stage 1 — means-end credit on discovered-but-discrete goals  ← FIRST SPEC
+Mine goals from real play: cluster observed `s_t → s_{t+k}` deltas into a goal set that refreshes
+over time (emergent, *not* a hardcoded vocabulary), but keep them **discrete so they're
+readable**. Add a **causal per-goal win-value** via randomized assignment
+(`P(win | do(assign g))`, de-confounded — this is item B) that drives both the curriculum
+(`w(g) = LP + β·novelty + γ·win_value(g)` — item D) and **potential-based reward shaping**
+(credit a delta by the `ΔV(s, win)` it produced, reusing the win value head — item D). This is
+the first version that could *beat vanilla*, and it tests THE question: does means-end goal
+practice transfer to strength? Discreteness keeps every downstream stage building on something
+you can see.
+
+### Stage 2 — the goal→goal stepping-stone graph
+Learn `P(achieve g′ | recently achieved g)` causally → a directed graph among discovered goals
+with **win as the sink node** (this is "learn which goals improve chances of other goals"). No
+controller yet — build and *inspect* the emergent graph; research payoff is whether it recovers
+sensible chess structure (center → development → king-safety → material → win). Item C's credit
+model (deltas-as-tokens transformer over the corpus) is the offline tool that powers this.
+
+### Stage 3 — hierarchical controller (composition + plans)
+The manager/worker (feudal/options) that selects subgoal *sequences* toward winning, with
+explicit **credit assignment over which subgoals carried the parent** (Ryan's exact ask). Built
+here because it needs Stages 1–2 and is the most iteration-hungry piece. This is the "hierarchy"
+destination from the 2026-06-14 plan.
+
+### Stage 4 — fully continuous emergent goals (most ambitious)
+Replace the discrete discovered set with a learned *continuous latent* goal space (Director
+style). Purest "nothing hard-coded." Deferred to last on purpose: front-loading it is where most
+emergent-HRL projects die; earn it only if Stages 1–3 show discreteness is the bottleneck.
+
+### Decision log
+- **Discrete-discovered-first** chosen over latent-continuous-first (2026-06-19): debuggable,
+  ships, beats-or-loses-to-vanilla cleanly; can't easily tell whether a bad latent-first result
+  is the goal space or the controller. Climb to continuous (Stage 4) only when earned.
+- Each stage = its own spec → plan → implement cycle. Stage 1 is the next spec.

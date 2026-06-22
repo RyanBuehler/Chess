@@ -45,6 +45,8 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
                          weights: HERWeights | None = None, deadline_max: int = 60):
     if not rec.has_cluster_goals():
         return []
+    if getattr(goalspace, "centroids", None) is None:
+        return []
     w = weights or HERWeights()
     out: list[ClusterGoalSample] = []
     T_ = len(rec)
@@ -61,12 +63,20 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
             v_goal=1.0 if ach else 0.0, v_goal_weight=w.search_laundered))
         if rem <= 0:
             continue
-        # future positives: clusters actually reached within the window
+        # future positives: clusters reached AND tau-achieved within the window.
+        # reached = nearest cluster (for negative exclusion); achieved_set = subset
+        # that also pass goalspace.achieved() (same criterion as active-goal check).
+        # Clusters that are reached-but-not-achieved are excluded from both sets
+        # ("ambiguous, don't train" — correct behavior).
         reached = set()
+        achieved_set = set()
         for t in range(i + 1, min(i + rem, T_) + 1):
-            reached.add(goalspace.assign(_delta(embedder, states, i, t)))
-        reached.discard(-1)
-        pos = sorted(reached - {active_cluster})
+            delta_t = _delta(embedder, states, i, t)
+            c = goalspace.assign(delta_t)
+            reached.add(c)
+            if goalspace.achieved(delta_t, c):
+                achieved_set.add(c)
+        pos = sorted(achieved_set - {active_cluster})
         if pos and w.future_samples > 0:
             for j in rng.choice(len(pos), size=min(w.future_samples, len(pos)), replace=False):
                 c = int(pos[int(j)])

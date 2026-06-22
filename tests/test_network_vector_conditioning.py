@@ -130,3 +130,36 @@ def test_empty_batch():
         np.zeros((0, 21, 8, 8), np.float32), np.zeros((0, _CFG.filters), np.float32), np.zeros(0, np.float32)
     )
     assert pol.shape[0] == 0 and vw.shape[0] == 0 and vg.shape[0] == 0
+
+
+def test_vector_deadline_scaled_internally():
+    """Forward scales raw deadlines internally; evaluate_planes must pass raw values.
+
+    deadline=60 and deadline=600 both clamp to 1.0 after /DEADLINE_SCALE=60,
+    so they must produce the SAME v_goal.  deadline=0 yields a different scaled
+    value (0.0 vs 1.0) so, with non-trivial FiLM weights, must produce a
+    DIFFERENT v_goal.
+    """
+    net = PolicyValueNet(_CFG, goal_conditioned=True)
+    # Randomise params so FiLM is non-trivial (same pattern as test_win_head_is_goal_agnostic)
+    with torch.no_grad():
+        for p in net.parameters():
+            if p.dim() >= 2:
+                torch.nn.init.normal_(p, std=0.1)
+    ev = VectorGoalNetEvaluator(net)
+    n, d = 1, _CFG.filters
+    pl = _planes(n)
+    gv = np.zeros((n, d), np.float32)
+
+    _, _, vg_60 = ev.evaluate_planes(pl, gv, np.array([60.0], np.float32))
+    _, _, vg_600 = ev.evaluate_planes(pl, gv, np.array([600.0], np.float32))
+    _, _, vg_0 = ev.evaluate_planes(pl, gv, np.array([0.0], np.float32))
+
+    # Both 60 and 600 clamp to 1.0 → same output
+    assert abs(float(vg_60[0]) - float(vg_600[0])) < 1e-6, (
+        f"deadline=60 and deadline=600 should give same v_goal, got {vg_60[0]} vs {vg_600[0]}"
+    )
+    # 0 vs 1.0 (scaled) → different output with non-trivial FiLM
+    assert abs(float(vg_60[0]) - float(vg_0[0])) > 1e-5, (
+        f"deadline=60 and deadline=0 should give different v_goal, got {vg_60[0]} vs {vg_0[0]}"
+    )

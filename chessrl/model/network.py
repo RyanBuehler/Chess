@@ -133,8 +133,10 @@ class PolicyValueNet(nn.Module):
                 deadline = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
             if deadline.dim() == 1:
                 deadline = deadline.unsqueeze(1)
+            # Vector mode scales internally (unlike planes); raw deadlines from buffer → [0,1].
+            deadline = (deadline.to(h.dtype) / DEADLINE_SCALE).clamp(0.0, 1.0)
             v_win = self.win_head(h)                              # unconditioned, goal-agnostic
-            cond = torch.cat([goal_vec.to(h.dtype), deadline.to(h.dtype)], dim=1)
+            cond = torch.cat([goal_vec.to(h.dtype), deadline], dim=1)
             h_cond = self.film(h, cond)
             logits = self.policy_conv(h_cond).permute(0, 2, 3, 1).flatten(1)
             v_goal = self.goal_head(h_cond)
@@ -424,7 +426,7 @@ class VectorGoalNetEvaluator:
             return z, np.zeros((0,), np.float32), np.zeros((0,), np.float32)
         x = torch.from_numpy(planes_batch).to(self.device)
         gv = torch.from_numpy(np.asarray(goal_vecs, np.float32).reshape(n, d)).to(self.device)
-        dl = torch.tensor(_scale_deadlines(deadlines).reshape(-1, 1), dtype=torch.float32, device=self.device)
+        dl = torch.tensor(np.asarray(deadlines, dtype=np.float32).reshape(-1, 1), dtype=torch.float32, device=self.device)
         logits, v_win, v_goal = self.net(x, deadline=dl, goal_vec=gv)
         policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
         return policies, v_win.squeeze(1).cpu().numpy().astype(np.float32), v_goal.squeeze(1).cpu().numpy().astype(np.float32)

@@ -61,3 +61,58 @@ def test_vanilla_record_yields_nothing():
     rec = b.finalize(z_white=0)
     out = cluster_goal_samples(rec, reconstruct_states(rec), FakeEmbedder(), FakeGoalSpace(), np.random.default_rng(0))
     assert out == []
+
+
+def test_returns_empty_when_goalspace_unfit():
+    """Fix 2: guard against GoalSpace not yet fit (centroids is None)."""
+    gs = FakeGoalSpace()
+    gs.centroids = None  # simulate unfit state
+    rec = _game()
+    states = reconstruct_states(rec)
+    out = cluster_goal_samples(rec, states, FakeEmbedder(), gs, np.random.default_rng(0))
+    assert out == []
+
+
+def test_positive_requires_tau():
+    """Fix 3: future-positives must pass goalspace.achieved() (tau-gated), not
+    merely be nearest-cluster.  A FakeGoalSpace with tau=0.01 ensures that a
+    delta near-but-not-within-tau of a centroid is ASSIGNED to that cluster but
+    NOT achieved → must not appear as a v_goal==1.0 positive."""
+
+    class TightGoalSpace:
+        """Like FakeGoalSpace but tau is tiny so only exact-centroid hits achieve."""
+        tau = 0.01
+        centroids = np.array([[0, 0, 0, 0], [1, 0, 0, 0], [2, 0, 0, 0]], np.float32)
+
+        def assign(self, delta):
+            return int(min(2, max(0, round(float(delta[0])))))
+
+        def achieved(self, delta, cluster):
+            return (self.assign(delta) == cluster and
+                    float(np.linalg.norm(delta - self.centroids[cluster])) <= self.tau)
+
+    class OffCentroidEmbedder:
+        """e(board) produces embeddings whose inter-board delta is close to
+        centroid 1 ([1,0,0,0]) but NOT within tau=0.01 of it."""
+        def embed_boards(self, boards):
+            # First board → [0, 0, 0, 0]; subsequent boards → [1.05, 0, 0, 0].
+            # delta = [1.05, 0, 0, 0]: assign→1, norm=0.05 > tau=0.01 → not achieved.
+            out = []
+            for i, b in enumerate(boards):
+                if b.fullmove_number == 1 and b.turn == chess.WHITE:
+                    out.append([0.0, 0.0, 0.0, 0.0])
+                else:
+                    out.append([1.05, 0.0, 0.0, 0.0])
+            return np.asarray(out, dtype=np.float32)
+
+    gs = TightGoalSpace()
+    rec = _game()
+    states = reconstruct_states(rec)
+    samples = cluster_goal_samples(rec, states, OffCentroidEmbedder(), gs, np.random.default_rng(0))
+    # Cluster 1 should be reached (assign returns 1) but not achieved (norm > tau).
+    # Therefore it must NOT appear as a v_goal==1.0 future-positive.
+    positives_cluster1 = [s for s in samples if s.cluster == 1 and s.v_goal == 1.0 and s.v_win_mask == 0.0]
+    assert positives_cluster1 == [], (
+        f"Cluster 1 is reached but not tau-achieved; should not be a positive. "
+        f"Got: {positives_cluster1}"
+    )

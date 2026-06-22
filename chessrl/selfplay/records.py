@@ -40,6 +40,7 @@ from chessrl.goals.templates import GoalTemplate
 
 _FIELDS = ("planes", "policy_indices", "policy_counts", "policy_offsets", "outcomes", "played")
 _GOAL_FIELDS = ("protagonist", "assigned_kind", "assigned_blob", "active_kind", "active_blob")
+_CLUSTER_FIELDS = ("assigned_cluster", "active_cluster", "active_vec", "explore")
 
 # Integer codes for goal kinds (stable, for the fast-filter columns).
 _KIND_CODES = {k: i for i, k in enumerate(T.KINDS)}
@@ -78,12 +79,20 @@ class GameRecord:
     assigned_blob: np.ndarray | None = None  # (T,) <U str blobs
     active_kind: np.ndarray | None = None    # (T,) int8 goal-kind code
     active_blob: np.ndarray | None = None    # (T,) <U str blobs
+    # --- optional cluster-goal columns (None for non-cluster records) -------
+    assigned_cluster: np.ndarray | None = None  # (T,) int32 cluster id (-1 = win)
+    active_cluster: np.ndarray | None = None     # (T,) int32 cluster id (-1 = win)
+    active_vec: np.ndarray | None = None         # (T, d) float32 goal centroid
+    explore: np.ndarray | None = None            # (T,) int8 (1 = epsilon-explore game)
 
     def __len__(self) -> int:
         return len(self.planes)
 
     def has_goals(self) -> bool:
         return self.active_blob is not None
+
+    def has_cluster_goals(self) -> bool:
+        return self.active_vec is not None
 
     def positions(self):
         for t in range(len(self)):
@@ -102,6 +111,9 @@ class GameRecord:
         if self.has_goals():
             for f in _GOAL_FIELDS:
                 out[f] = getattr(self, f)
+        if self.has_cluster_goals():
+            for f in _CLUSTER_FIELDS:
+                out[f] = getattr(self, f)
         np.savez_compressed(path, **out)
 
     @classmethod
@@ -110,6 +122,9 @@ class GameRecord:
             kw = {f: z[f] for f in _FIELDS}
             if "active_blob" in z.files:
                 for f in _GOAL_FIELDS:
+                    kw[f] = z[f]
+            if "active_vec" in z.files:
+                for f in _CLUSTER_FIELDS:
                     kw[f] = z[f]
             return cls(**kw)
 
@@ -127,6 +142,12 @@ class RecordBuilder:
         self._assigned: list[GoalTemplate] = []
         self._active: list[GoalTemplate] = []
         self._has_goals = False
+        # cluster-goal columns (parallel; empty for non-cluster records)
+        self._cl_assigned: list[int] = []
+        self._cl_active: list[int] = []
+        self._cl_vec: list[np.ndarray] = []
+        self._cl_explore: list[int] = []
+        self._has_clusters = False
 
     def add(
         self,
@@ -138,6 +159,10 @@ class RecordBuilder:
         protagonist: bool | None = None,
         assigned_goal: GoalTemplate | None = None,
         active_goal: GoalTemplate | None = None,
+        cluster_active=None,
+        cluster_assigned=None,
+        active_vec=None,
+        explore=None,
     ) -> None:
         self._planes.append(encode_board(board))
         self._idx.extend(int(i) for i in move_indices)
@@ -150,6 +175,12 @@ class RecordBuilder:
             self._proto.append(1 if protagonist == chess.WHITE else 0)
             self._assigned.append(assigned_goal)
             self._active.append(active_goal)
+        if active_vec is not None:
+            self._has_clusters = True
+            self._cl_assigned.append(int(cluster_assigned) if cluster_assigned is not None else -1)
+            self._cl_active.append(int(cluster_active) if cluster_active is not None else -1)
+            self._cl_vec.append(np.asarray(active_vec, dtype=np.float32))
+            self._cl_explore.append(1 if explore else 0)
 
     def finalize(self, z_white: int) -> GameRecord:
         outcomes = np.array(
@@ -173,4 +204,9 @@ class RecordBuilder:
                 [_KIND_CODES[g.kind] for g in self._active], dtype=np.int8
             )
             rec.active_blob = np.array([serialize_goal(g) for g in self._active])
+        if self._has_clusters:
+            rec.assigned_cluster = np.array(self._cl_assigned, dtype=np.int32)
+            rec.active_cluster = np.array(self._cl_active, dtype=np.int32)
+            rec.active_vec = np.stack(self._cl_vec).astype(np.float32)
+            rec.explore = np.array(self._cl_explore, dtype=np.int8)
         return rec

@@ -28,6 +28,11 @@ class MCTSConfig:
     fpu_reduction: float = 0.3
     temperature_moves: int = 30   # sample proportionally to visits for this many plies, then argmax
     leaves_per_tree: int = 1      # M5: K leaves selected per tree per batching round (virtual loss). K=1 == reference.
+    meansend_alpha: float = 0.0   # v2 means-end leaf blend: (1-a)*v_win + a*(2*v_goal-1)
+
+    def __post_init__(self):
+        if not (0.0 <= self.meansend_alpha <= 1.0):
+            raise ValueError(f"meansend_alpha must be in [0,1], got {self.meansend_alpha}")
 
 
 @dataclass(frozen=True)

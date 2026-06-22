@@ -17,14 +17,17 @@ from chessrl.config.config import RunConfig
 from chessrl.goals.assignment import make_assigner
 from chessrl.goals.curriculum import Curriculum
 from chessrl.goals.repertoire import Repertoire
+from chessrl.goals.goalspace import GoalSpace
 from chessrl.model.network import (
     BatchedGoalNetEvaluator,
     BatchedNetEvaluator,
     PolicyValueNet,
+    VectorGoalNetEvaluator,
 )
 from chessrl.selfplay.concurrent import (
     play_games_concurrent,
     play_goal_games_concurrent,
+    play_meansend_games_concurrent,
 )
 from chessrl.selfplay.pgn_io import save_pgn
 
@@ -77,15 +80,40 @@ def _load_curriculum(run_dir, cfg: RunConfig):
     )
 
 
+GOALSPACE_DIR = "goalspace"
+FROZEN_ENCODER = "frozen_encoder.pt"
+
+
+def _load_goalspace(run_dir, cfg: RunConfig, device: str):
+    """Load the persisted GoalSpace (centroids for cluster assignment) with a
+    frozen embedder from frozen_encoder.pt. Returns None until the trainer has
+    written both (cold start -> the assigner plays terminal-only)."""
+    gdir = Path(run_dir) / GOALSPACE_DIR
+    fenc = Path(run_dir) / FROZEN_ENCODER
+    if not gdir.exists() or not fenc.exists():
+        return None
+    try:
+        embedder = VectorGoalNetEvaluator.from_checkpoint(fenc, cfg.network, device=device)
+        return GoalSpace.load(gdir, cfg.goal, embedder, np.random.default_rng(0))
+    except Exception:
+        return None
+
+
 def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     """Newest checkpoint if present, else a fresh net seeded identically across
     workers so a cold-start run begins from the same weights everywhere.
 
-    Returns a BatchedNetEvaluator for vanilla (goal_mode=none), or a
-    BatchedGoalNetEvaluator (batched goal-conditioned net) for goal modes — the
-    batched evaluator drives the concurrent goal self-play driver."""
-    goal_mode = cfg.goal.goal_mode != "none"
+    Returns a BatchedNetEvaluator for vanilla (goal_mode=none), a
+    VectorGoalNetEvaluator for emergent mode, or a BatchedGoalNetEvaluator
+    (batched goal-conditioned net) for v1 goal modes."""
     ckpt = _newest_checkpoint(run_dir)
+    if cfg.goal.goal_mode == "emergent":
+        if ckpt is not None:
+            return VectorGoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
+        torch.manual_seed(seed)
+        net = PolicyValueNet(cfg.network, goal_conditioned=True)
+        return VectorGoalNetEvaluator(net, device=device)
+    goal_mode = cfg.goal.goal_mode != "none"
     if goal_mode:
         if ckpt is not None:
             return BatchedGoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
@@ -124,14 +152,22 @@ def _run_goal_batch(
 def run_one_batch(
     run_dir, worker_id: int, evaluator, cfg: RunConfig,
     rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
-    curriculum=None,
+    curriculum=None, goalspace=None,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
-    Returns the next free counter. Both goal and vanilla modes play the batch
-    CONCURRENTLY (many games advanced in lockstep through one batched MCTS): goal
-    modes via play_goal_games_concurrent, vanilla via play_games_concurrent. Both
-    thread the live-feed publisher and per-game id prefix through."""
-    if cfg.goal.goal_mode != "none":
+    Returns the next free counter. Emergent mode uses play_meansend_games_concurrent
+    with a VectorGoalNetEvaluator and a GoalSpace. Goal modes (v1) use
+    play_goal_games_concurrent via _run_goal_batch. Vanilla uses play_games_concurrent.
+    All modes thread the live-feed publisher and per-game id prefix through."""
+    if cfg.goal.goal_mode == "emergent":
+        win_vector = evaluator.net.win_vector.detach().cpu().numpy()
+        results = play_meansend_games_concurrent(
+            evaluator, cfg.mcts, cfg.selfplay, cfg.goal, goalspace, win_vector, rng,
+            num_games=cfg.selfplay.concurrent_games,
+            publisher=publisher,
+            game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
+        )
+    elif cfg.goal.goal_mode != "none":
         results = _run_goal_batch(
             evaluator, cfg, rng, curriculum=curriculum,
             publisher=publisher,
@@ -176,6 +212,10 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     curriculum = _load_curriculum(run_dir, cfg)
     rep_path = run_dir / REPERTOIRE_FILE
     rep_mtime = rep_path.stat().st_mtime if rep_path.exists() else None
+    # Emergent goalspace snapshot; reloaded when meta.json mtime changes.
+    goalspace = _load_goalspace(run_dir, cfg, resolved_device)
+    gs_meta_path = run_dir / GOALSPACE_DIR / "meta.json"
+    gs_mtime = gs_meta_path.stat().st_mtime if gs_meta_path.exists() else None
 
     publisher = NullPublisher()
     if cfg.selfplay.feed_port > 0:
@@ -190,7 +230,11 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
             newest = _newest_checkpoint(run_dir)
             if newest is not None and newest != loaded_ckpt:
                 try:
-                    if cfg.goal.goal_mode != "none":
+                    if cfg.goal.goal_mode == "emergent":
+                        evaluator = VectorGoalNetEvaluator.from_checkpoint(
+                            newest, cfg.network, device=resolved_device
+                        )
+                    elif cfg.goal.goal_mode != "none":
                         evaluator = BatchedGoalNetEvaluator.from_checkpoint(
                             newest, cfg.network, device=resolved_device
                         )
@@ -214,9 +258,19 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                         rep_mtime = m
                 except Exception:
                     pass
+            # Reload the goalspace when meta.json mtime changes (emergent mode).
+            if cfg.goal.goal_mode == "emergent" and gs_meta_path.exists():
+                try:
+                    m = gs_meta_path.stat().st_mtime
+                    if m != gs_mtime:
+                        goalspace = _load_goalspace(run_dir, cfg, resolved_device)
+                        gs_mtime = m
+                except Exception:
+                    pass
             counter = run_one_batch(
                 run_dir, worker_id, evaluator, cfg, rng, counter,
                 publisher=publisher, batch_index=batch_index, curriculum=curriculum,
+                goalspace=goalspace,
             )
             batch_index += 1
             # tight loop is fine; the sentinel check between batches paces shutdown.

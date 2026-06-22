@@ -528,6 +528,56 @@ def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_
     })
 
 
+def _meansend_aux(g, protagonist, estimator=None):
+    """Structured two-side ``aux`` for a means-end game frame: BOTH sides'
+    cluster goal, phase, and optional win-value estimate with the side-to-move
+    marked. Returns a dict ``{cols, to_move, rows}`` or ``[]`` defensively if a
+    side is missing."""
+    w = g.sides.get(chess.WHITE)
+    b = g.sides.get(chess.BLACK)
+    if w is None or b is None:
+        return []
+
+    def goal_str(side):
+        return "win" if side.is_terminal() else f"cluster {side.active_cluster}"
+
+    def phase_str(side):
+        return "terminal" if side.is_terminal() else "pursuing"
+
+    def win_val_str(side):
+        if estimator is not None and not side.is_terminal():
+            return f"{estimator.win_value(side.active_cluster):+.2f}"
+        return "—"  # em dash
+
+    return {
+        "cols": ["White", "Black"],
+        "to_move": 0 if protagonist == chess.WHITE else 1,
+        "rows": [
+            ["goal", goal_str(w), goal_str(b)],
+            ["phase", phase_str(w), phase_str(b)],
+            ["win-value", win_val_str(w), win_val_str(b)],
+        ],
+    }
+
+
+def _publish_meansend_move(publisher, g, chosen_move, root_q: float, top_moves: list,
+                           protagonist, estimator=None) -> None:
+    """Publish one means-end game frame mirroring _publish_goal_move's payload
+    schema, with a structured ``aux`` describing BOTH sides' cluster goal /
+    phase / win-value with the side-to-move marked (see _meansend_aux)."""
+    publisher.publish(g.game_id, {
+        "game_id": g.game_id,
+        "fen": g.board.fen(),
+        "last_move_uci": chosen_move.uci(),
+        "ply": g.ply,
+        "root_q": float(root_q),
+        "top_moves": top_moves,
+        "done": bool(g.done),
+        "z": int(g.z) if g.done else None,
+        "aux": _meansend_aux(g, protagonist, estimator),
+    })
+
+
 # ===========================================================================
 # Means-end concurrent self-play (v2, Stage 4b).
 #
@@ -561,7 +611,7 @@ class _MeansEndGame:
 def play_meansend_games_concurrent(
     evaluator_vector, mcts_cfg, sp_cfg, goal_cfg, goalspace, win_vector, rng,
     num_games, explore: bool = False, publisher=None, game_id_prefix: str = "",
-    curriculum=None,
+    curriculum=None, estimator=None,
 ) -> list:
     """Means-end concurrent self-play (v2). Each side pursues a discovered cluster
     goal (or the terminal objective) under the Plan 4a means-end MCTS; the switch
@@ -569,6 +619,8 @@ def play_meansend_games_concurrent(
     list[(GameRecord, final_board, z, meta)] in slot order."""
     publisher = publisher or NullPublisher()
     win_vector = np.asarray(win_vector, np.float32)
+    if estimator is None and curriculum is not None:
+        estimator = getattr(curriculum, "est", None)
     mcts = BatchedMCTS(evaluator_vector, mcts_cfg, rng, meansend=True)
 
     games: list[_MeansEndGame] = []
@@ -599,7 +651,7 @@ def play_meansend_games_concurrent(
         while any(t.root.visit_count < mcts_cfg.simulations + 1 for t in trees):
             mcts.step_round(trees)
         for g in active:
-            _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher)
+            _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator)
 
     results = []
     for g in games:
@@ -612,7 +664,7 @@ def play_meansend_games_concurrent(
     return results
 
 
-def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher) -> None:
+def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator=None) -> None:
     protagonist = g.board.turn
     side = g.sides[protagonist]
     visits = mcts.visit_counts(g.tree)
@@ -644,7 +696,7 @@ def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng
             if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
                 g.z = -1 if protagonist == chess.WHITE else 1
                 g.done = True
-                _publish_move(publisher, g, chosen_move, root_q, top_moves)
+                _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator)
                 return
         else:
             g.resign_streak[protagonist] = 0
@@ -655,4 +707,4 @@ def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng
     g.ply += 1
     maybe_switch_cluster_to_terminal(side, g.ply, win_vector, goal_cfg.deadline_max)
     _goal_check_pre_move_termination(g, sp_cfg)
-    _publish_move(publisher, g, chosen_move, root_q, top_moves)
+    _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator)

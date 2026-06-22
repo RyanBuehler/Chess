@@ -17,10 +17,12 @@ import numpy as np
 import torch
 
 from chessrl.config.config import RunConfig
+from chessrl.goals.goalspace import GoalSpace
 from chessrl.goals.repertoire import Repertoire
-from chessrl.model.network import PolicyValueNet
+from chessrl.model.network import PolicyValueNet, VectorGoalNetEvaluator
 from chessrl.selfplay.worker import worker_main
 from chessrl.training.buffer import GoalReplayBuffer, ReplayBuffer
+from chessrl.training.her import reconstruct_states
 from chessrl.training.loop import (
     goal_achievement_rates,
     repertoire_learning_progress,
@@ -29,6 +31,39 @@ from chessrl.training.loop import (
 )
 from chessrl.training.provenance import build_provenance
 from chessrl.training.trainer import Trainer
+from chessrl.training.vector_buffer import VectorGoalReplayBuffer
+
+
+GOALSPACE_DIR = "goalspace"
+FROZEN_ENCODER = "frozen_encoder.pt"
+
+
+def snapshot_frozen_encoder(net, run_dir, network_cfg, device) -> "VectorGoalNetEvaluator":
+    """Save net.state_dict() to run_dir/frozen_encoder.pt (atomic) and return a
+    VectorGoalNetEvaluator loaded from it."""
+    import os
+    path = Path(run_dir) / FROZEN_ENCODER
+    tmp = path.with_suffix(".pt.tmp")
+    torch.save({"model": net.state_dict()}, tmp)
+    os.replace(tmp, path)
+    return VectorGoalNetEvaluator.from_checkpoint(path, network_cfg, device=device)
+
+
+def observe_game_deltas(goalspace, rec, embedder, max_samples: int, rng) -> None:
+    """Sample up to max_samples plies of a game, compute frozen-encoder window
+    deltas e(s_{i+w}) - e(s_i), and add them to the GoalSpace reservoir."""
+    states = reconstruct_states(rec)
+    T = len(states) - 1
+    w = goalspace.cfg.goal_window
+    starts = [i for i in range(T) if i + w <= T]
+    if not starts:
+        return
+    if len(starts) > max_samples:
+        starts = [int(s) for s in rng.choice(starts, size=max_samples, replace=False)]
+    emb = embedder.embed_boards([states[i] for i in starts] + [states[i + w] for i in starts])
+    half = len(starts)
+    for k in range(half):
+        goalspace.observe_delta(emb[half + k] - emb[k])
 
 
 def make_run_dir(cfg: RunConfig, runs_root, run_dir_name: str | None = None) -> Path:
@@ -56,7 +91,7 @@ REPERTOIRE_FILE = "repertoire.json"
 
 def ingest_new_games(
     run_dir, buffer, ingested: set, recent_records: deque | None = None,
-    repertoire=None,
+    repertoire=None, on_record=None,
 ) -> tuple:
     """Add any .npz games not yet ingested. Returns (games_added, positions_added).
     Files that fail to load (half-written) are skipped and retried next pass.
@@ -66,7 +101,11 @@ def ingest_new_games(
 
     When ``repertoire`` is given (lp mode, plan Task 4.3) each new record drives
     the repertoire feedback loop: mint first-seen deltas, update assigned-goal
-    stats, spawn plateaued children. The caller persists the snapshot."""
+    stats, spawn plateaued children. The caller persists the snapshot.
+
+    When ``on_record`` is given (emergent mode), it is called with each freshly
+    loaded GameRecord immediately after buffer ingestion. v1 callers pass None
+    and are unaffected."""
     from chessrl.selfplay.records import GameRecord
 
     games_dir = Path(run_dir) / "games"
@@ -88,6 +127,8 @@ def ingest_new_games(
             recent_records.append(rec)
         if repertoire is not None and rec.has_goals():
             repertoire.update_and_refine_from_record(rec)
+        if on_record is not None:
+            on_record(rec)
     return games_added, positions_added
 
 
@@ -223,15 +264,31 @@ def main(argv=None) -> Path:
     rng = np.random.default_rng(seed + baseline_games)
 
     goal_mode = cfg.goal.goal_mode != "none"
+    emergent_mode = cfg.goal.goal_mode == "emergent"
     net = PolicyValueNet(cfg.network, goal_conditioned=goal_mode)
     trainer = Trainer(net, cfg.training, run_dir)
-    # Goal runs use the HER goal buffer + BCE training; vanilla is unchanged.
-    if goal_mode:
+
+    # Emergent mode: vector FiLM net + frozen encoder + GoalSpace + VectorGoalReplayBuffer.
+    # v1 goal modes and vanilla are unchanged.
+    frozen_encoder = None
+    goalspace = None
+    if emergent_mode:
+        frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
+        goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
+        buffer = VectorGoalReplayBuffer(
+            cfg.training.buffer_size, frozen_encoder, goalspace,
+            deadline_max=cfg.goal.deadline_max,
+        )
+        goalspace.save(run_dir / GOALSPACE_DIR)
+    elif goal_mode:
+        # Goal runs use the HER goal buffer + BCE training; vanilla is unchanged.
         buffer = GoalReplayBuffer(cfg.training.buffer_size, deadline_max=cfg.goal.deadline_max)
     else:
         buffer = ReplayBuffer(cfg.training.buffer_size)
-    # Bounded window of recent goal records for the wishful-thinking thermometer.
-    recent_records: deque | None = deque(maxlen=512) if goal_mode else None
+
+    # Bounded window of recent goal records for the wishful-thinking thermometer
+    # (v1 goal modes only; emergent does not use the repertoire/thermometer path).
+    recent_records: deque | None = (deque(maxlen=512) if goal_mode and not emergent_mode else None)
     # LP curriculum repertoire (lp mode only): the trainer owns the canonical
     # snapshot, mints/updates it from new games, and persists it so workers can
     # reload it (plan Task 4.3). Resume reconstructs it from the persisted file.
@@ -249,7 +306,19 @@ def main(argv=None) -> Path:
         ckpts = sorted((run_dir / "checkpoints").glob("ckpt_*.pt"))
         if ckpts:
             trainer.load_checkpoint(ckpts[-1])
-        if goal_mode:
+        if emergent_mode:
+            # Reload or rebuild the frozen encoder and GoalSpace; then rebuild buffer.
+            gs_path = run_dir / GOALSPACE_DIR
+            frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
+            if gs_path.exists():
+                goalspace = GoalSpace.load(gs_path, cfg.goal, frozen_encoder, rng)
+            else:
+                goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
+            buffer = VectorGoalReplayBuffer.from_run_dir(
+                run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
+                deadline_max=cfg.goal.deadline_max,
+            )
+        elif goal_mode:
             buffer = GoalReplayBuffer.from_run_dir(
                 run_dir, cfg.training.buffer_size, deadline_max=cfg.goal.deadline_max
             )
@@ -280,24 +349,50 @@ def main(argv=None) -> Path:
 
     try:
         while games_seen < args.games:
-            added, positions = ingest_new_games(
-                run_dir, buffer, ingested, recent_records, repertoire=repertoire
-            )
-            games_seen += added
-            total_positions += positions
-            # Persist the updated repertoire snapshot so workers reload it on
-            # their checkpoint cadence (plan Task 4.3). Atomic write.
-            if repertoire is not None and added:
-                repertoire.save(run_dir / REPERTOIRE_FILE)
+            if emergent_mode:
+                # Emergent branch: observe GoalSpace deltas per new record,
+                # maybe_refresh (re-snapshot encoder + rebuild buffer), then train
+                # with the vector dual-head trainer.
+                added, positions = ingest_new_games(
+                    run_dir, buffer, ingested,
+                    on_record=lambda rec: observe_game_deltas(
+                        goalspace, rec, frozen_encoder, max_samples=8, rng=rng
+                    ),
+                )
+                games_seen += added
+                total_positions += positions
+                if added:
+                    refreshed = goalspace.maybe_refresh(
+                        baseline_games + games_seen,
+                        embedder=snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device),
+                    )
+                    if refreshed:
+                        frozen_encoder = goalspace.embedder  # updated by maybe_refresh
+                        buffer = VectorGoalReplayBuffer.from_run_dir(
+                            run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
+                            deadline_max=cfg.goal.deadline_max,
+                        )
+                        goalspace.save(run_dir / GOALSPACE_DIR)
+            else:
+                added, positions = ingest_new_games(
+                    run_dir, buffer, ingested, recent_records, repertoire=repertoire
+                )
+                games_seen += added
+                total_positions += positions
+                # Persist the updated repertoire snapshot so workers reload it on
+                # their checkpoint cadence (plan Task 4.3). Atomic write.
+                if repertoire is not None and added:
+                    repertoire.save(run_dir / REPERTOIRE_FILE)
 
             steps_done = 0
             n = trainer.allowed_steps(total_positions)
             if n > 0 and len(buffer) >= cfg.training.batch_size:
-                m = (
-                    trainer.train_steps_goal(buffer, n, rng)
-                    if goal_mode
-                    else trainer.train_steps(buffer, n, rng)
-                )
+                if emergent_mode:
+                    m = trainer.train_steps_vector(buffer, n, rng)
+                elif goal_mode:
+                    m = trainer.train_steps_goal(buffer, n, rng)
+                else:
+                    m = trainer.train_steps(buffer, n, rng)
                 steps_done = n
                 bucket = trainer.step // cfg.training.checkpoint_every_steps
                 if bucket > last_ckpt_bucket:
@@ -378,13 +473,23 @@ def main(argv=None) -> Path:
                 p.terminate()
                 p.join(timeout=10)
         # final drain of any games written during shutdown
-        added, positions = ingest_new_games(
-            run_dir, buffer, ingested, repertoire=repertoire
-        )
+        if emergent_mode:
+            added, positions = ingest_new_games(
+                run_dir, buffer, ingested,
+                on_record=lambda rec: observe_game_deltas(
+                    goalspace, rec, frozen_encoder, max_samples=8, rng=rng
+                ),
+            )
+            if goalspace is not None:
+                goalspace.save(run_dir / GOALSPACE_DIR)
+        else:
+            added, positions = ingest_new_games(
+                run_dir, buffer, ingested, repertoire=repertoire
+            )
+            if repertoire is not None:
+                repertoire.save(run_dir / REPERTOIRE_FILE)
         games_seen += added
         total_positions += positions
-        if repertoire is not None:
-            repertoire.save(run_dir / REPERTOIRE_FILE)
         trainer.save_checkpoint()
         (run_dir / "state.json").write_text(
             json.dumps({"games": baseline_games + games_seen, "positions": total_positions})

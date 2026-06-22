@@ -1,0 +1,42 @@
+# v2 Stage 1: emergent goal-space + FiLM vector conditioning.
+# Mirrors gp-vanilla.yaml (6x64 net, 200 sims, same training/selfplay cadence)
+# for a fair comparison. Only the goal/conditioning fields differ.
+run_name: v2-stage1
+network:
+  blocks: 6
+  filters: 64
+  goal_cond: vector
+mcts:
+  simulations: 200
+  temperature_moves: 30
+  leaves_per_tree: 1
+  meansend_alpha: 0.25
+selfplay:
+  workers: 12
+  concurrent_games: 32
+  ply_cap: 512
+  feed_port: 5555
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  buffer_size: 500000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 500
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 8
+  agent_simulations: 200
+  max_plies: 200
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50
+goal:
+  goal_mode: emergent
+  cluster_k: 48
+  refresh_every: 2000
+  reservoir_size: 20000
+  min_reservoir: 5000
+  goal_window: 8
+  win_floor: 0.2
+  deadline_max: 60

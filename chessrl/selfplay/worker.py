@@ -18,6 +18,7 @@ from chessrl.goals.assignment import make_assigner
 from chessrl.goals.curriculum import Curriculum
 from chessrl.goals.repertoire import Repertoire
 from chessrl.goals.goalspace import GoalSpace
+from chessrl.goals.winvalue import ClusterCurriculum, WinValueEstimator
 from chessrl.model.network import (
     BatchedGoalNetEvaluator,
     BatchedNetEvaluator,
@@ -82,6 +83,30 @@ def _load_curriculum(run_dir, cfg: RunConfig):
 
 GOALSPACE_DIR = "goalspace"
 FROZEN_ENCODER = "frozen_encoder.pt"
+WINVALUE_FILE = "winvalue.json"
+
+
+def _load_winvalue_curriculum(run_dir, cfg: RunConfig, goalspace) -> "ClusterCurriculum | None":
+    """Build a ClusterCurriculum from the persisted winvalue.json, if present.
+
+    Returns None when absent (uniform cluster fallback) or goalspace is None.
+    Workers reload this on winvalue.json mtime change, mirroring goalspace reload."""
+    if goalspace is None:
+        return None
+    path = Path(run_dir) / WINVALUE_FILE
+    if not path.exists():
+        return None
+    try:
+        est = WinValueEstimator.load(path)
+    except Exception:
+        return None
+    return ClusterCurriculum(
+        est,
+        goalspace.n_clusters,
+        cfg.goal.novelty_beta,
+        cfg.goal.gamma_winvalue,
+        cfg.goal.win_floor,
+    )
 
 
 def _load_goalspace(run_dir, cfg: RunConfig, device: str):
@@ -152,13 +177,15 @@ def _run_goal_batch(
 def run_one_batch(
     run_dir, worker_id: int, evaluator, cfg: RunConfig,
     rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
-    curriculum=None, goalspace=None,
+    curriculum=None, goalspace=None, wv_curriculum=None,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
     Returns the next free counter. Emergent mode uses play_meansend_games_concurrent
     with a VectorGoalNetEvaluator and a GoalSpace. Goal modes (v1) use
     play_goal_games_concurrent via _run_goal_batch. Vanilla uses play_games_concurrent.
-    All modes thread the live-feed publisher and per-game id prefix through."""
+    All modes thread the live-feed publisher and per-game id prefix through.
+    ``wv_curriculum`` (emergent mode) is the ClusterCurriculum built from the
+    win-value estimator; passed to play_meansend_games_concurrent as ``curriculum``."""
     if cfg.goal.goal_mode == "emergent":
         win_vector = evaluator.net.win_vector.detach().cpu().numpy()
         results = play_meansend_games_concurrent(
@@ -166,6 +193,7 @@ def run_one_batch(
             num_games=cfg.selfplay.concurrent_games,
             publisher=publisher,
             game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
+            curriculum=wv_curriculum,
         )
     elif cfg.goal.goal_mode != "none":
         results = _run_goal_batch(
@@ -216,6 +244,10 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     goalspace = _load_goalspace(run_dir, cfg, resolved_device)
     gs_meta_path = run_dir / GOALSPACE_DIR / "meta.json"
     gs_mtime = gs_meta_path.stat().st_mtime if gs_meta_path.exists() else None
+    # Win-value curriculum (emergent mode); reloaded when winvalue.json mtime changes.
+    wv_path = run_dir / WINVALUE_FILE
+    wv_curriculum = _load_winvalue_curriculum(run_dir, cfg, goalspace)
+    wv_mtime = wv_path.stat().st_mtime if wv_path.exists() else None
 
     publisher = NullPublisher()
     if cfg.selfplay.feed_port > 0:
@@ -265,12 +297,25 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                     if m != gs_mtime:
                         goalspace = _load_goalspace(run_dir, cfg, resolved_device)
                         gs_mtime = m
+                        # Rebuild win-value curriculum whenever goalspace reloads
+                        # (n_clusters may have changed after re-fit).
+                        wv_curriculum = _load_winvalue_curriculum(run_dir, cfg, goalspace)
+                        wv_mtime = wv_path.stat().st_mtime if wv_path.exists() else None
+                except Exception:
+                    pass
+            # Reload win-value curriculum when winvalue.json mtime changes (emergent mode).
+            if cfg.goal.goal_mode == "emergent" and wv_path.exists():
+                try:
+                    m = wv_path.stat().st_mtime
+                    if m != wv_mtime:
+                        wv_curriculum = _load_winvalue_curriculum(run_dir, cfg, goalspace)
+                        wv_mtime = m
                 except Exception:
                     pass
             counter = run_one_batch(
                 run_dir, worker_id, evaluator, cfg, rng, counter,
                 publisher=publisher, batch_index=batch_index, curriculum=curriculum,
-                goalspace=goalspace,
+                goalspace=goalspace, wv_curriculum=wv_curriculum,
             )
             batch_index += 1
             # tight loop is fine; the sentinel check between batches paces shutdown.

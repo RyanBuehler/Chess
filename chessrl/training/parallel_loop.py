@@ -19,6 +19,7 @@ import torch
 from chessrl.config.config import RunConfig
 from chessrl.goals.goalspace import GoalSpace
 from chessrl.goals.repertoire import Repertoire
+from chessrl.goals.winvalue import WinValueEstimator
 from chessrl.model.network import PolicyValueNet, VectorGoalNetEvaluator
 from chessrl.selfplay.worker import worker_main
 from chessrl.training.buffer import GoalReplayBuffer, ReplayBuffer
@@ -36,6 +37,41 @@ from chessrl.training.vector_buffer import VectorGoalReplayBuffer
 
 GOALSPACE_DIR = "goalspace"
 FROZEN_ENCODER = "frozen_encoder.pt"
+WINVALUE_FILE = "winvalue.json"
+
+
+def update_winvalue_from_record(estimator, rec) -> None:
+    """Update the interventional win-value estimator from one EXPLORE game: for
+    each side whose game-assigned goal was epsilon-explore (and a real cluster),
+    credit a win/loss by that side's outcome. z_white = the White-frame result.
+
+    Side-to-move is inferred from ply parity (ply 0 = White, ply 1 = Black, ...)
+    when the protagonist field is absent (cluster-only records from emergent mode);
+    falls back to rec.protagonist when present (v1 goal records)."""
+    if not rec.has_cluster_goals():
+        return
+    import chess
+
+    def _is_white(i: int) -> bool:
+        if rec.protagonist is not None:
+            return int(rec.protagonist[i]) == 1
+        # Cluster records omit protagonist; derive from ply parity (White=0,2,4,…).
+        return (i % 2) == 0
+
+    # White-frame z: outcomes[i] is from side-to-move; flip for Black.
+    z_white = None
+    for i in range(len(rec)):
+        z_white = int(rec.outcomes[i]) if _is_white(i) else -int(rec.outcomes[i])
+        break
+    if z_white is None:
+        return
+    # Per side: find its assigned cluster + explore flag from a ply where it moved.
+    for white_side, won in ((True, z_white > 0), (False, z_white < 0)):
+        for i in range(len(rec)):
+            if _is_white(i) == white_side:
+                if bool(rec.explore[i]) and int(rec.assigned_cluster[i]) >= 0:
+                    estimator.update(int(rec.assigned_cluster[i]), won)
+                break
 
 
 def snapshot_frozen_encoder(net, run_dir, network_cfg, device) -> "VectorGoalNetEvaluator":
@@ -272,6 +308,7 @@ def main(argv=None) -> Path:
     # v1 goal modes and vanilla are unchanged.
     frozen_encoder = None
     goalspace = None
+    winvalue = None
     if emergent_mode:
         frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
         goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
@@ -280,6 +317,7 @@ def main(argv=None) -> Path:
             deadline_max=cfg.goal.deadline_max,
         )
         goalspace.save(run_dir / GOALSPACE_DIR)
+        winvalue = WinValueEstimator()
     elif goal_mode:
         # Goal runs use the HER goal buffer + BCE training; vanilla is unchanged.
         buffer = GoalReplayBuffer(cfg.training.buffer_size, deadline_max=cfg.goal.deadline_max)
@@ -325,6 +363,8 @@ def main(argv=None) -> Path:
                 goalspace = GoalSpace.load(gs_path, cfg.goal, frozen_encoder, rng)
             else:
                 goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
+            wv_path = run_dir / WINVALUE_FILE
+            winvalue = WinValueEstimator.load(wv_path) if wv_path.exists() else WinValueEstimator()
             buffer = VectorGoalReplayBuffer.from_run_dir(
                 run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
                 deadline_max=cfg.goal.deadline_max,
@@ -366,12 +406,15 @@ def main(argv=None) -> Path:
                 # with the vector dual-head trainer.
                 added, positions = ingest_new_games(
                     run_dir, buffer, ingested,
-                    on_record=lambda rec: observe_game_deltas(
-                        goalspace, rec, frozen_encoder, max_samples=8, rng=rng
+                    on_record=lambda rec: (
+                        observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=8, rng=rng),
+                        update_winvalue_from_record(winvalue, rec),
                     ),
                 )
                 games_seen += added
                 total_positions += positions
+                if added and winvalue is not None:
+                    winvalue.save(run_dir / WINVALUE_FILE)
                 # Only snapshot the frozen encoder when a refresh will actually fire
                 # (epoch turned + reservoir ready): the snapshot is an expensive
                 # state_dict copy + disk write, and snapshotting every cycle also opens
@@ -489,12 +532,15 @@ def main(argv=None) -> Path:
         if emergent_mode:
             added, positions = ingest_new_games(
                 run_dir, buffer, ingested,
-                on_record=lambda rec: observe_game_deltas(
-                    goalspace, rec, frozen_encoder, max_samples=8, rng=rng
+                on_record=lambda rec: (
+                    observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=8, rng=rng),
+                    update_winvalue_from_record(winvalue, rec),
                 ),
             )
             if goalspace is not None:
                 goalspace.save(run_dir / GOALSPACE_DIR)
+            if winvalue is not None:
+                winvalue.save(run_dir / WINVALUE_FILE)
         else:
             added, positions = ingest_new_games(
                 run_dir, buffer, ingested, repertoire=repertoire

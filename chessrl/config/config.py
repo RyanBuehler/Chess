@@ -85,10 +85,14 @@ class GoalConfig:
     reservoir_size: int = 20000      # capacity of the delta reservoir
     min_reservoir: int = 5000        # deltas required before the goal space is "ready"
     goal_window: int = 8             # plies over which a state-delta is measured
+    epsilon: float = 0.15            # fraction of assignments that are uniform-random (interventional)
+    gamma_winvalue: float = 1.0      # curriculum weight on win_value(g)
 
     def __post_init__(self):
         if self.goal_mode not in ("none", "always_win", "random", "lp", "emergent"):
             raise ValueError(f"bad goal_mode {self.goal_mode}")
+        if not (0.0 <= self.epsilon <= 1.0):
+            raise ValueError(f"epsilon must be in [0,1], got {self.epsilon}")
 
 
 @dataclass(frozen=True)

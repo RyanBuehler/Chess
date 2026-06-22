@@ -40,3 +40,5 @@ goal:
   goal_window: 8
   win_floor: 0.2
   deadline_max: 60
+  epsilon: 0.15
+  gamma_winvalue: 1.0

@@ -229,7 +229,7 @@ class _GoalGame:
 
     __slots__ = (
         "builder", "board", "states", "sides", "allow_resign", "resign_streak",
-        "ply", "done", "z", "tree", "game_id",
+        "ply", "done", "z", "tree", "game_id", "last_pv",
     )
 
     def __init__(self, board: chess.Board, sides: dict, allow_resign: bool):
@@ -244,6 +244,9 @@ class _GoalGame:
         self.z = 0
         self.tree = None        # the fresh per-ply search tree (rebuilt each round)
         self.game_id = ""        # M7: stable per-game topic for the live feed
+        # Each side's most recent root P(achieve), so the live feed can show BOTH
+        # sides every frame (the non-moving side's value is its last search).
+        self.last_pv = {chess.WHITE: None, chess.BLACK: None}
 
 
 def play_goal_games_concurrent(
@@ -347,6 +350,7 @@ def _play_one_goal_move(
 
     visits = mcts.visit_counts(g.tree)
     root_v = mcts.root_q(g.tree)        # protagonist-frame achievement prob at root
+    g.last_pv[protagonist] = float(root_v)   # remember for the both-sides live feed
     idxs = np.fromiter(visits.keys(), dtype=np.int64)
     counts = np.fromiter(visits.values(), dtype=np.float64)
     if g.ply < mcts_cfg.temperature_moves:
@@ -383,7 +387,7 @@ def _play_one_goal_move(
                 g.z = -1 if protagonist == chess.WHITE else 1
                 g.done = True
                 _publish_goal_move(publisher, g, chosen_move, root_v, top_moves,
-                                   searched_goal, protagonist)
+                                   protagonist)
                 return
         else:
             g.resign_streak[protagonist] = 0
@@ -399,26 +403,50 @@ def _play_one_goal_move(
     _maybe_switch_to_win(side, g.states, protagonist, g.ply)
 
     _goal_check_pre_move_termination(g, sp_cfg)
-    _publish_goal_move(publisher, g, chosen_move, root_v, top_moves,
-                       searched_goal, protagonist)
+    _publish_goal_move(publisher, g, chosen_move, root_v, top_moves, protagonist)
 
 
-def _goal_aux(active_goal, root_v: float, protagonist) -> list:
-    """Build the generic `aux` key/value pairs for a goal-game frame from
-    ALREADY-COMPUTED state (no rng, no new search). Each pair is [str, str].
-    The UI renders these schema-agnostically; the meaning lives here only."""
-    return [
-        ["goal", active_goal.describe()],
-        ["deadline", f"by ply {active_goal.deadline}"],
-        ["side", "white" if protagonist == chess.WHITE else "black"],
-        ["P(achieve)", f"{float(root_v):.2f}"],
-    ]
+def _goal_aux(g, protagonist):
+    """Structured two-side `aux` for a goal-game frame: BOTH sides' assigned goal,
+    phase, and last P(achieve), with the side-to-move marked -- so the live view
+    shows White and Black at once instead of flip-flopping each ply (the published
+    goal used to swap every half-move). The renderer lays out cols x rows
+    generically and knows nothing about goals; the meaning lives here only.
+
+    Returns a dict ``{cols, to_move, rows}`` (rows = [label, white_val,
+    black_val]); ``[]`` defensively if a side is missing. Phase is abbreviated to
+    "pursuing"/"resolved" -- going for the win after a sub-goal resolves is
+    implicit, so it is not spelled out; win-floor games show "—"."""
+    w = g.sides.get(chess.WHITE)
+    b = g.sides.get(chess.BLACK)
+    if w is None or b is None:
+        return []
+
+    def phase(side):
+        if side.assigned.is_win():
+            return "—"
+        return "pursuing" if not side.active.is_win() else "resolved"
+
+    def pv(color):
+        v = g.last_pv.get(color)
+        return f"{float(v):.2f}" if v is not None else "—"
+
+    return {
+        "cols": ["White", "Black"],
+        "to_move": 0 if protagonist == chess.WHITE else 1,
+        "rows": [
+            ["goal", w.assigned.describe(), b.assigned.describe()],
+            ["phase", phase(w), phase(b)],
+            ["P(achieve)", pv(chess.WHITE), pv(chess.BLACK)],
+        ],
+    }
 
 
 def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_moves: list,
-                       active_goal=None, protagonist=None) -> None:
+                       protagonist=None) -> None:
     """Publish one goal-game frame mirroring _publish_move's payload schema, plus
-    a generic `aux` list of [key, value] string pairs describing the active goal."""
+    a structured `aux` describing BOTH sides' assigned goal / phase / P(achieve)
+    with the side-to-move marked (see _goal_aux)."""
     publisher.publish(g.game_id, {
         "game_id": g.game_id,
         "fen": g.board.fen(),
@@ -428,5 +456,5 @@ def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_
         "top_moves": top_moves,
         "done": bool(g.done),
         "z": int(g.z) if g.done else None,
-        "aux": _goal_aux(active_goal, root_q, protagonist) if active_goal is not None else [],
+        "aux": _goal_aux(g, protagonist) if protagonist is not None else [],
     })

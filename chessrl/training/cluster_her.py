@@ -55,12 +55,18 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
         rem = min(deadline_max, T_ - i)
         active_cluster = int(rec.active_cluster[i])
         active_vec = np.asarray(rec.active_vec[i], np.float32)
-        # active sample: outcome target (tanh head) + active-goal achievement (goal head)
+        # active sample: outcome target (tanh head) + active-goal achievement (goal head).
+        # On TERMINAL-pursuit plies (active_cluster == -1, goal_vec == win_vector) the side
+        # is chasing the extrinsic reward, NOT a cluster sub-goal — so suppress the goal-head
+        # loss (weight 0) there: training V_goal(win_vector) -> 0 would teach a spurious
+        # "never achieved" signal and drag down the means-end value during terminal pursuit.
+        # The win-head signal (v_win, mask 1) is always kept. (Adversarial review Bug B/F.)
         ach = active_cluster >= 0 and _achieved_cluster(embedder, goalspace, states, i, active_cluster, rem)
         out.append(ClusterGoalSample(
             ply=i, goal_vec=active_vec, cluster=active_cluster, remaining=rem,
             v_win=float(rec.outcomes[i]), v_win_mask=1.0,
-            v_goal=1.0 if ach else 0.0, v_goal_weight=w.search_laundered))
+            v_goal=1.0 if ach else 0.0,
+            v_goal_weight=w.search_laundered if active_cluster >= 0 else 0.0))
         if rem <= 0:
             continue
         # future positives: clusters reached AND tau-achieved within the window.

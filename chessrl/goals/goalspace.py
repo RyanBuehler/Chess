@@ -58,6 +58,13 @@ class GoalSpace:
         self.centroids = cents
         self.tau = median_radius(x, cents, labels)
 
+    def should_refresh(self, games_seen: int) -> bool:
+        """Side-effect-free predicate: would maybe_refresh() fit this epoch?
+        Lets the caller avoid an expensive frozen-encoder snapshot on cycles that
+        will not refresh (adversarial review Bug A/E)."""
+        epoch = games_seen // self.cfg.refresh_every
+        return epoch > self._last_refresh_epoch and len(self.reservoir) >= self.cfg.min_reservoir
+
     def maybe_refresh(self, games_seen: int, embedder=None) -> bool:
         epoch = games_seen // self.cfg.refresh_every
         if epoch <= self._last_refresh_epoch:

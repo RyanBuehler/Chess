@@ -372,18 +372,20 @@ def main(argv=None) -> Path:
                 )
                 games_seen += added
                 total_positions += positions
-                if added:
-                    refreshed = goalspace.maybe_refresh(
-                        baseline_games + games_seen,
-                        embedder=snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device),
+                # Only snapshot the frozen encoder when a refresh will actually fire
+                # (epoch turned + reservoir ready): the snapshot is an expensive
+                # state_dict copy + disk write, and snapshotting every cycle also opens
+                # a crash-recovery hole where frozen_encoder.pt is ahead of the saved
+                # centroids (adversarial review Bug A/E).
+                if added and goalspace.should_refresh(baseline_games + games_seen):
+                    new_enc = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
+                    goalspace.maybe_refresh(baseline_games + games_seen, embedder=new_enc)
+                    frozen_encoder = new_enc
+                    buffer = VectorGoalReplayBuffer.from_run_dir(
+                        run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
+                        deadline_max=cfg.goal.deadline_max,
                     )
-                    if refreshed:
-                        frozen_encoder = goalspace.embedder  # updated by maybe_refresh
-                        buffer = VectorGoalReplayBuffer.from_run_dir(
-                            run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
-                            deadline_max=cfg.goal.deadline_max,
-                        )
-                        goalspace.save(run_dir / GOALSPACE_DIR)
+                    goalspace.save(run_dir / GOALSPACE_DIR)
             else:
                 added, positions = ingest_new_games(
                     run_dir, buffer, ingested, recent_records, repertoire=repertoire

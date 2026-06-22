@@ -35,6 +35,36 @@ def _game(d=4, n=4):
     return b.finalize(z_white=1)
 
 
+def _terminal_game(d=4, n=4):
+    """A terminal-pursuit game: every ply active_cluster=-1, active_vec=win_vector."""
+    b = RecordBuilder(); board = chess.Board()
+    win_vec = np.full(d, -1.0, np.float32)
+    for ply in range(n):
+        move = list(board.legal_moves)[0]
+        idx = move_to_index(move, board.turn == chess.BLACK)
+        b.add(board, [idx, idx + 1], [3, 1], played_index=idx, protagonist=board.turn,
+              cluster_active=-1, cluster_assigned=-1, active_vec=win_vec, explore=False)
+        board.push(move)
+    return b.finalize(z_white=1)
+
+
+def test_terminal_ply_suppresses_goal_head_weight():
+    # Adversarial review Bug B/F: terminal-pursuit active samples (cluster=-1) must
+    # carry the win-head signal (v_win_mask=1) but ZERO goal-head weight, so the goal
+    # head is never trained on the win-vector conditioning.
+    rec = _terminal_game()
+    states = reconstruct_states(rec)
+    samples = cluster_goal_samples(rec, states, FakeEmbedder(), FakeGoalSpace(), np.random.default_rng(0))
+    actives = [s for s in samples if s.v_win_mask == 1.0]
+    assert actives and all(s.cluster == -1 for s in actives)
+    assert all(s.v_goal_weight == 0.0 for s in actives)   # goal-head loss suppressed
+    # a normal sub-goal game still carries non-zero goal-head weight on its active samples
+    rec2 = _game()
+    s2 = [s for s in cluster_goal_samples(rec2, reconstruct_states(rec2), FakeEmbedder(),
+                                          FakeGoalSpace(), np.random.default_rng(0)) if s.v_win_mask == 1.0]
+    assert any(s.v_goal_weight > 0.0 for s in s2)
+
+
 def test_active_sample_per_ply_with_win_target():
     rec = _game()
     states = reconstruct_states(rec)

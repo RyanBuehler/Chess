@@ -100,6 +100,52 @@ class Trainer:
         n = max(n, 1)
         return {"policy_loss": lp_sum / n, "value_loss": lv_sum / n, "step": self.step}
 
+    def train_steps_vector(self, buffer, n: int, rng: np.random.Generator) -> dict:
+        """Dual-head SGD step for the v2 vector net (Plan 4c). Loss =
+        masked-MSE on the tanh terminal-reward head (v_win, masked to active
+        samples) + weighted-BCE on the sigmoid goal head (v_goal) + masked-CE
+        policy. BCE is computed in fp32 outside autocast (autocast forbids
+        binary_cross_entropy). Deadlines are passed RAW; the vector net scales
+        them internally."""
+        import torch
+        import torch.nn.functional as F
+
+        self.net.train()
+        lp_sum = lv_sum = 0.0
+        for _ in range(n):
+            x, gv, deadline, p, p_mask, v_win, v_win_mask, v_goal, v_goal_w = \
+                buffer.sample(self.cfg.batch_size, rng)
+            xt = torch.from_numpy(x).to(self.device)
+            gvt = torch.from_numpy(gv).to(self.device)
+            dt = torch.from_numpy(deadline).to(self.device)
+            pt = torch.from_numpy(p).to(self.device)
+            pmask = torch.from_numpy(p_mask).to(self.device)
+            vwin = torch.from_numpy(v_win).to(self.device)
+            vwmask = torch.from_numpy(v_win_mask).to(self.device)
+            vgoal = torch.from_numpy(v_goal).to(self.device)
+            vgw = torch.from_numpy(v_goal_w).to(self.device)
+            with torch.autocast(self.device, enabled=self.device == "cuda"):
+                logits, v_win_pred, v_goal_pred = self.net(xt, deadline=dt, goal_vec=gvt)
+                ce = -(pt * F.log_softmax(logits, dim=1)).sum(dim=1)
+                loss_p = (ce * pmask).sum() / pmask.sum().clamp_min(1.0)
+                # masked MSE on the win head (active samples only)
+                se = (v_win_pred.squeeze(1) - vwin) ** 2
+                loss_win = (se * vwmask).sum() / vwmask.sum().clamp_min(1.0)
+            with torch.autocast(self.device, enabled=False):
+                vg = v_goal_pred.float().squeeze(1).clamp(1e-6, 1.0 - 1e-6)
+                bce = F.binary_cross_entropy(vg, vgoal.float(), reduction="none")
+                loss_goal = (bce * vgw.float()).sum() / vgw.float().sum().clamp_min(1e-6)
+                loss = loss_p.float() + loss_win.float() + loss_goal
+            self.opt.zero_grad(set_to_none=True)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.opt)
+            self.scaler.update()
+            self.step += 1
+            lp_sum += loss_p.detach().item()
+            lv_sum += (loss_win + loss_goal).detach().item()
+        n = max(n, 1)
+        return {"policy_loss": lp_sum / n, "value_loss": lv_sum / n, "step": self.step}
+
     def save_checkpoint(self) -> Path:
         d = self.run_dir / "checkpoints"
         d.mkdir(parents=True, exist_ok=True)

@@ -33,3 +33,11 @@ def test_update_skips_non_explore():
           active_vec=np.zeros(4, np.float32), explore=False)
     update_winvalue_from_record(est, b.finalize(z_white=1))
     assert est.attempts(1) == 0   # non-explore -> no update
+
+
+def test_update_skips_draws():
+    # Adversarial review Bug 2: a drawn game must NOT credit either side's cluster
+    # (crediting both as losses biases every win_value downward).
+    est = WinValueEstimator()
+    update_winvalue_from_record(est, _explore_game(white_cluster=2, black_cluster=5, z_white=0))
+    assert est.attempts(2) == 0 and est.attempts(5) == 0

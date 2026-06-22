@@ -63,7 +63,9 @@ def update_winvalue_from_record(estimator, rec) -> None:
     for i in range(len(rec)):
         z_white = int(rec.outcomes[i]) if _is_white(i) else -int(rec.outcomes[i])
         break
-    if z_white is None:
+    # Skip draws: crediting both sides' clusters as losses on a draw biases every
+    # win_value downward (adversarial review Bug 2). Only decisive games inform it.
+    if z_white is None or z_white == 0:
         return
     # Per side: find its assigned cluster + explore flag from a ply where it moved.
     for white_side, won in ((True, z_white > 0), (False, z_white < 0)):
@@ -429,6 +431,13 @@ def main(argv=None) -> Path:
                         deadline_max=cfg.goal.deadline_max,
                     )
                     goalspace.save(run_dir / GOALSPACE_DIR)
+                    # Refit reassigns arbitrary cluster ids, so win-value stats keyed
+                    # by the OLD ids are meaningless now — reset + persist so workers
+                    # rebuild a fresh curriculum (adversarial review Bug 4, the
+                    # win-value analogue of the buffer-rebuild-on-refit fix).
+                    if winvalue is not None:
+                        winvalue = WinValueEstimator()
+                        winvalue.save(run_dir / WINVALUE_FILE)
             else:
                 added, positions = ingest_new_games(
                     run_dir, buffer, ingested, recent_records, repertoire=repertoire

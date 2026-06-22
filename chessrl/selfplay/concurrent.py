@@ -9,6 +9,7 @@ each new root.
 """
 import chess
 import numpy as np
+from dataclasses import dataclass
 
 from chessrl.chess_env.game import terminal_value
 from chessrl.chess_env.moves import index_to_move
@@ -192,6 +193,54 @@ def _is_false_positive(g: _Game) -> bool:
         return g.z >= 0
     else:
         return g.z <= 0
+
+
+# ===========================================================================
+# Cluster side-goal helpers for means-end (emergent goal-space) self-play.
+# Used by Stage 4b+; the assigner is called once per side at game start and
+# the deadline helper is called after every move (idempotent).
+# ===========================================================================
+
+
+@dataclass
+class _ClusterSideGoal:
+    """One side's cluster goal for a means-end game. ``active_cluster < 0`` means
+    the side is pursuing the terminal/extrinsic objective (vec = the net's
+    win_vector)."""
+    assigned_cluster: int
+    assigned_vec: np.ndarray
+    deadline: int
+    start_ply: int
+    active_cluster: int
+    active_vec: np.ndarray
+
+    def is_terminal(self) -> bool:
+        return self.active_cluster < 0
+
+
+def assign_cluster_goal(goalspace, win_vector, goal_cfg, rng) -> _ClusterSideGoal:
+    """Pick one side's goal: with prob win_floor (or always, if the goal space
+    isn't ready) the terminal objective; else a uniform-random discovered
+    cluster. Stage 4c replaces the uniform draw with the LP+win-value curriculum
+    and the epsilon-explore branch."""
+    win_vector = np.asarray(win_vector, np.float32)
+    ready = getattr(goalspace, "ready", False) and getattr(goalspace, "centroids", None) is not None
+    if not ready or rng.random() < goal_cfg.win_floor:
+        return _ClusterSideGoal(-1, win_vector, goal_cfg.deadline_max, 0, -1, win_vector)
+    c = int(rng.integers(goalspace.n_clusters))
+    vec = np.asarray(goalspace.centroid(c), np.float32)
+    return _ClusterSideGoal(c, vec, goal_cfg.goal_window, 0, c, vec)
+
+
+def maybe_switch_cluster_to_terminal(side: _ClusterSideGoal, ply: int, win_vector, deadline_max: int) -> None:
+    """Deadline-based switch: once the goal window elapses, pursue the terminal
+    objective for the rest of the game (idempotent)."""
+    if side.is_terminal():
+        return
+    if ply - side.start_ply >= side.deadline:
+        side.active_cluster = -1
+        side.active_vec = np.asarray(win_vector, np.float32)
+        side.deadline = deadline_max
 
 
 # ===========================================================================

@@ -308,8 +308,19 @@ def main(argv=None) -> Path:
             trainer.load_checkpoint(ckpts[-1])
         if emergent_mode:
             # Reload or rebuild the frozen encoder and GoalSpace; then rebuild buffer.
+            # CRITICAL: on resume, LOAD the persisted frozen encoder (the snapshot
+            # whose embedding space the persisted GoalSpace centroids live in) —
+            # do NOT re-snapshot the current net, or the centroids and the encoder
+            # would be in different metric spaces and assign()/achieved() would be
+            # silently wrong. Only snapshot fresh if no frozen encoder exists yet.
             gs_path = run_dir / GOALSPACE_DIR
-            frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
+            frozen_enc_path = run_dir / FROZEN_ENCODER
+            if frozen_enc_path.exists():
+                frozen_encoder = VectorGoalNetEvaluator.from_checkpoint(
+                    frozen_enc_path, cfg.network, device=trainer.device
+                )
+            else:
+                frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
             if gs_path.exists():
                 goalspace = GoalSpace.load(gs_path, cfg.goal, frozen_encoder, rng)
             else:

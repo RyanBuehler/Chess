@@ -25,38 +25,34 @@ def _board_batch(n=4):
     return torch.zeros(n, NUM_PLANES, 8, 8)
 
 
-def test_vector_forward_shapes_and_range():
+def test_vector_forward_dual_head_shapes_and_ranges():
     net = PolicyValueNet(_CFG, goal_conditioned=True).eval()
     d = _CFG.filters
-    x = _board_batch(4)
-    gv = torch.randn(4, d)
-    dl = torch.zeros(4, 1)
-    logits, value = net(x, deadline=dl, goal_vec=gv)
+    x = _board_batch(4); gv = torch.randn(4, d); dl = torch.zeros(4, 1)
+    logits, v_win, v_goal = net(x, deadline=dl, goal_vec=gv)
     assert logits.shape == (4, 4672)
-    assert value.shape == (4, 1)
-    assert float(value.min()) >= 0.0 and float(value.max()) <= 1.0  # sigmoid
+    assert v_win.shape == (4, 1) and v_goal.shape == (4, 1)
+    assert float(v_win.min()) >= -1.0 and float(v_win.max()) <= 1.0   # tanh
+    assert float(v_goal.min()) >= 0.0 and float(v_goal.max()) <= 1.0  # sigmoid
 
 
-def test_vector_forward_requires_goal_vec():
+def test_vector_requires_goal_vec():
     net = PolicyValueNet(_CFG, goal_conditioned=True).eval()
     with pytest.raises(ValueError):
         net(_board_batch(2), deadline=torch.zeros(2, 1), goal_vec=None)
 
 
-def test_film_actually_conditions():
+def test_win_head_is_goal_agnostic():
     net = PolicyValueNet(_CFG, goal_conditioned=True).eval()
-    d = _CFG.filters
-    x = _board_batch(1)
-    dl = torch.zeros(1, 1)
-    # distinct goal vectors should produce distinct values (after a forward that
-    # exercises the FiLM MLP with non-zero params).
+    d = _CFG.filters; x = _board_batch(1); dl = torch.zeros(1, 1)
     with torch.no_grad():
         for p in net.parameters():
             if p.dim() >= 2:
                 torch.nn.init.normal_(p, std=0.1)
-        va = net(x, deadline=dl, goal_vec=torch.full((1, d), -2.0))[1]
-        vb = net(x, deadline=dl, goal_vec=torch.full((1, d), 2.0))[1]
-    assert abs(float(va) - float(vb)) > 1e-5
+        _, vw_a, vg_a = net(x, deadline=dl, goal_vec=torch.full((1, d), -2.0))
+        _, vw_b, vg_b = net(x, deadline=dl, goal_vec=torch.full((1, d), 2.0))
+    assert abs(float(vw_a) - float(vw_b)) < 1e-6      # win value invariant to goal
+    assert abs(float(vg_a) - float(vg_b)) > 1e-5      # goal value varies with goal
 
 
 def test_embed_shape_and_determinism():
@@ -100,13 +96,14 @@ def test_evaluator_requires_vector_net():
         VectorGoalNetEvaluator(bad)
 
 
-def test_evaluate_planes_shapes():
+def test_evaluate_planes_dual_head_shapes():
     net = PolicyValueNet(_CFG, goal_conditioned=True)
     ev = VectorGoalNetEvaluator(net)
     n, d = 3, _CFG.filters
-    pol, val = ev.evaluate_planes(_planes(n), np.zeros((n, d), np.float32), np.zeros(n, np.float32))
-    assert pol.shape == (n, 4672) and val.shape == (n,)
-    assert val.min() >= 0.0 and val.max() <= 1.0
+    pol, vw, vg = ev.evaluate_planes(_planes(n), np.zeros((n, d), np.float32), np.zeros(n, np.float32))
+    assert pol.shape == (n, 4672) and vw.shape == (n,) and vg.shape == (n,)
+    assert vw.min() >= -1.0 and vw.max() <= 1.0
+    assert vg.min() >= 0.0 and vg.max() <= 1.0
 
 
 def test_embed_boards_shape():
@@ -116,21 +113,20 @@ def test_embed_boards_shape():
     assert e.shape == (2, _CFG.filters)
 
 
-def test_win_value_uses_win_vector():
+def test_win_value_is_goal_agnostic():
     net = PolicyValueNet(_CFG, goal_conditioned=True)
     ev = VectorGoalNetEvaluator(net)
-    n = 2
+    n, d = 2, _CFG.filters
     wv = ev.win_value(_planes(n), np.zeros(n, np.float32))
-    # equals evaluate_planes under the net's win_vector broadcast
-    win_vecs = np.broadcast_to(net.win_vector.detach().numpy(), (n, _CFG.filters)).copy()
-    _, val = ev.evaluate_planes(_planes(n), win_vecs, np.zeros(n, np.float32))
-    assert np.allclose(wv, val, atol=1e-5)
+    # equals v_win from evaluate_planes under ANY goal vectors (goal-agnostic)
+    _, vw, _ = ev.evaluate_planes(_planes(n), np.full((n, d), 3.0, np.float32), np.zeros(n, np.float32))
+    assert np.allclose(wv, vw, atol=1e-5)
 
 
 def test_empty_batch():
     net = PolicyValueNet(_CFG, goal_conditioned=True)
     ev = VectorGoalNetEvaluator(net)
-    pol, val = ev.evaluate_planes(
+    pol, vw, vg = ev.evaluate_planes(
         np.zeros((0, 21, 8, 8), np.float32), np.zeros((0, _CFG.filters), np.float32), np.zeros(0, np.float32)
     )
-    assert pol.shape[0] == 0 and val.shape[0] == 0
+    assert pol.shape[0] == 0 and vw.shape[0] == 0 and vg.shape[0] == 0

@@ -81,18 +81,17 @@ class PolicyValueNet(nn.Module):
         self.goal_cond = cfg.goal_cond if goal_conditioned else "none"
         d = ch  # embedding dim == filters (GAP of trunk)
         if goal_conditioned and cfg.goal_cond == "vector":
-            # FiLM conditioning from (centroid d ⊕ deadline scalar).
-            self.win_vector = nn.Parameter(torch.zeros(d))
+            self.win_vector = nn.Parameter(torch.zeros(d))   # conditions policy/goal-head when pursuing win
             self.film = FiLM(in_dim=d + 1, channels=ch)
-            self.value_head = nn.Sequential(
-                nn.Conv2d(ch, 8, 1),
-                nn.BatchNorm2d(8),
-                nn.ReLU(),
-                nn.Flatten(),
-                nn.Linear(8 * 64, 64),
-                nn.ReLU(),
-                nn.Linear(64, 1),
-                nn.Sigmoid(),
+            # WIN value: tanh game-outcome off the UNCONDITIONED trunk (like vanilla).
+            self.win_head = nn.Sequential(
+                nn.Conv2d(ch, 8, 1), nn.BatchNorm2d(8), nn.ReLU(), nn.Flatten(),
+                nn.Linear(8 * 64, 64), nn.ReLU(), nn.Linear(64, 1), nn.Tanh(),
+            )
+            # GOAL achievement: sigmoid off the FiLM-CONDITIONED features.
+            self.goal_head = nn.Sequential(
+                nn.Conv2d(ch, 8, 1), nn.BatchNorm2d(8), nn.ReLU(), nn.Flatten(),
+                nn.Linear(8 * 64, 64), nn.ReLU(), nn.Linear(64, 1), nn.Sigmoid(),
             )
         elif goal_conditioned:  # "planes" (legacy v1) — UNCHANGED
             self.value_body = nn.Sequential(
@@ -134,10 +133,12 @@ class PolicyValueNet(nn.Module):
                 deadline = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
             if deadline.dim() == 1:
                 deadline = deadline.unsqueeze(1)
+            v_win = self.win_head(h)                              # unconditioned, goal-agnostic
             cond = torch.cat([goal_vec.to(h.dtype), deadline.to(h.dtype)], dim=1)
-            h = self.film(h, cond)
-            logits = self.policy_conv(h).permute(0, 2, 3, 1).flatten(1)
-            return logits, self.value_head(h)
+            h_cond = self.film(h, cond)
+            logits = self.policy_conv(h_cond).permute(0, 2, 3, 1).flatten(1)
+            v_goal = self.goal_head(h_cond)
+            return logits, v_win, v_goal
         logits = self.policy_conv(h).permute(0, 2, 3, 1).flatten(1)
         if self.goal_cond == "planes":
             if deadline is None:
@@ -415,19 +416,18 @@ class VectorGoalNetEvaluator:
         return cls(net, device=device)
 
     @torch.no_grad()
-    def evaluate_planes(self, planes_batch: np.ndarray, goal_vecs: np.ndarray, deadlines: np.ndarray):
+    def evaluate_planes(self, planes_batch, goal_vecs, deadlines):
         n = planes_batch.shape[0]
         d = self.net.win_vector.shape[0]
         if n == 0:
-            return (np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32),
-                    np.zeros((0,), dtype=np.float32))
+            z = np.zeros((0, self.net.policy_conv.out_channels * 64), dtype=np.float32)
+            return z, np.zeros((0,), np.float32), np.zeros((0,), np.float32)
         x = torch.from_numpy(planes_batch).to(self.device)
-        gv = torch.from_numpy(np.asarray(goal_vecs, dtype=np.float32).reshape(n, d)).to(self.device)
+        gv = torch.from_numpy(np.asarray(goal_vecs, np.float32).reshape(n, d)).to(self.device)
         dl = torch.tensor(_scale_deadlines(deadlines).reshape(-1, 1), dtype=torch.float32, device=self.device)
-        logits, value = self.net(x, deadline=dl, goal_vec=gv)
+        logits, v_win, v_goal = self.net(x, deadline=dl, goal_vec=gv)
         policies = torch.softmax(logits, dim=1).cpu().numpy().astype(np.float32)
-        values = value.squeeze(1).cpu().numpy().astype(np.float32)
-        return policies, values
+        return policies, v_win.squeeze(1).cpu().numpy().astype(np.float32), v_goal.squeeze(1).cpu().numpy().astype(np.float32)
 
     @torch.no_grad()
     def embed_boards(self, boards: list) -> np.ndarray:
@@ -437,11 +437,11 @@ class VectorGoalNetEvaluator:
         return self.net.embed(x).cpu().numpy().astype(np.float32)
 
     @torch.no_grad()
-    def win_value(self, planes_batch: np.ndarray, deadlines: np.ndarray) -> np.ndarray:
+    def win_value(self, planes_batch, deadlines):
         n = planes_batch.shape[0]
         d = self.net.win_vector.shape[0]
         if n == 0:
-            return np.zeros((0,), dtype=np.float32)
+            return np.zeros((0,), np.float32)
         win_vecs = self.net.win_vector.detach().cpu().numpy().reshape(1, d).repeat(n, axis=0)
-        _, values = self.evaluate_planes(planes_batch, win_vecs, deadlines)
-        return values
+        _, v_win, _ = self.evaluate_planes(planes_batch, win_vecs, deadlines)
+        return v_win

@@ -120,13 +120,26 @@ Stage 1 estimates win-value **interventionally**:
 
 ### Means-end objective
 
-While a side is assigned goal `g` (with the DUAL head above: `V(s,win)` is the tanh outcome head,
-`V_goal(s,g)` the sigmoid achievement head — both from one forward):
+**FRAMING (2026-06-22, Ryan): "winning" is NOT hardcoded — it is the environment's TERMINAL /
+EXTRINSIC reward.** The agent grounds on `r_extrinsic` (a configurable signal; in *this* chess
+environment `r_extrinsic` = game outcome z ∈ {-1,0,1}), and self-invented cluster goals are the
+**intrinsic** layer on top — the standard intrinsic-motivation formulation `r = r_extrinsic +
+β·r_intrinsic`. Nothing in the net or search says "win": the tanh head predicts *expected terminal
+reward*, and in chess that target happens to be the outcome. The code symbols (`v_win`, `win_head`)
+are the chess instance of this general concept, not a chess-specific objective. The grounding signal
+is necessary — v1 (no grounding, pure autotelic) collapsed to ~230 Elo vs 754 — but it is provided
+by the environment, not wired into the architecture. **Emergent terminal goal** (the agent
+*discovering* which goal is terminal by how chains of goals lead to `r_extrinsic`) is the Stage 2→3
+hierarchy payoff, built on this grounded Stage 1; it is explicitly out of scope here.
 
-- **RL value target = `V(s, win)` = tanh outcome head** (protagonist game outcome, like vanilla).
-  Default `α = 0`: winning is the objective, always. Resignation gate **on**. This is the change
-  that should remove the ~500 Elo machinery tax — the win objective is now the strong tanh/MSE
-  target, not a sigmoid achievement probability.
+While a side is assigned goal `g` (with the DUAL head above: the tanh head = expected terminal
+reward `V(s,r_ext)` (a.k.a. `V(s,win)` in chess), `V_goal(s,g)` the sigmoid achievement head — both
+from one forward):
+
+- **RL value target = expected terminal reward** (tanh outcome head; chess: game outcome, like
+  vanilla). Default `α = 0`: maximizing terminal reward is the objective, always. Resignation gate
+  **on**. This is the change that removes the ~500 Elo machinery tax — the objective is now the
+  strong tanh/MSE terminal-reward target, not a sigmoid achievement probability.
 - **Potential-based shaping** adds reward `F = γ_shape · (Φ(s′; g) − Φ(s; g))` with potential
   `Φ(s; g) = V_goal(s, g)` (the sigmoid goal head). By the potential-based-shaping theorem this
   cannot make the agent sacrifice the game for the goal — it only accelerates credit toward goal

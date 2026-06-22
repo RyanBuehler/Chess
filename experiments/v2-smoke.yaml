@@ -1,0 +1,43 @@
+# v2 end-to-end SMOKE config: shrunk thresholds so the FULL emergent loop
+# (self-play -> reservoir -> refresh -> cluster fit -> buffer rebuild -> training
+# -> checkpoint -> post-refresh sub-goals) completes in minutes at low heat.
+# NOT for real training — use v2-stage1.yaml for that.
+run_name: v2-smoke
+network:
+  blocks: 2
+  filters: 16
+  goal_cond: vector
+mcts:
+  simulations: 12
+  temperature_moves: 8
+  leaves_per_tree: 1
+  meansend_alpha: 0.25
+selfplay:
+  workers: 3
+  concurrent_games: 4
+  ply_cap: 24
+  feed_port: 0          # disable live feed (avoid 5555 collision with serve.py)
+training:
+  batch_size: 16
+  learning_rate: 0.001
+  buffer_size: 5000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 20
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 4
+  agent_simulations: 12
+  max_plies: 24
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 20
+goal:
+  goal_mode: emergent
+  cluster_k: 8
+  refresh_every: 50     # first refresh at game 50
+  reservoir_size: 2000
+  min_reservoir: 100    # reservoir fills well before game 50
+  goal_window: 4
+  win_floor: 0.2
+  deadline_max: 20

@@ -62,15 +62,19 @@ class SearchTree:
     its own goal, protagonist, and baseline, so a leaf encodes its OWN goal planes
     + deadline and the per-game minimax/terminal algebra uses its OWN context."""
 
-    __slots__ = ("root", "board", "sims_done", "baseline", "goal", "protagonist")
+    __slots__ = ("root", "board", "sims_done", "baseline", "goal", "protagonist",
+                 "goal_vec", "deadline_origin")
 
-    def __init__(self, board: chess.Board, baseline=None, goal=None, protagonist=None):
+    def __init__(self, board: chess.Board, baseline=None, goal=None, protagonist=None,
+                 goal_vec=None, deadline_origin=None):
         self.root = Node(0.0)
         self.board = board
         self.sims_done = 0
         self.baseline = baseline
         self.goal = goal
         self.protagonist = protagonist
+        self.goal_vec = goal_vec
+        self.deadline_origin = deadline_origin
 
 
 class BatchedMCTS:
@@ -82,6 +86,7 @@ class BatchedMCTS:
         goal=None,
         protagonist: bool | None = None,
         goal_mode: bool | None = None,
+        meansend: bool = False,
     ):
         self.evaluator = evaluator_many
         self.cfg = cfg
@@ -99,6 +104,10 @@ class BatchedMCTS:
         self.goal = goal
         self.protagonist = protagonist
         self.goal_mode = (goal is not None) if goal_mode is None else goal_mode
+        # Means-end mode: vanilla negamax mechanics, but leaves are evaluated
+        # by the dual-head vector evaluator (v_win, v_goal) and the value is an
+        # alpha-blend. goal_mode stays False in this mode.
+        self.meansend = meansend
         if goal is not None and protagonist is None:
             raise ValueError("goal-conditioned BatchedMCTS requires a protagonist")
 
@@ -136,6 +145,24 @@ class BatchedMCTS:
         tree = SearchTree(
             b, baseline=board_features(b), goal=goal, protagonist=protagonist
         )
+        value = self._expand_leaf(tree, tree.root, plies_from_root=0)
+        tree.root.visit_count += 1
+        tree.root.value_sum += value
+        if add_noise and tree.root.children:
+            self._add_dirichlet(tree.root)
+        return tree
+
+    def init_tree_for_meansend(
+        self, board: chess.Board, goal_vec, deadline: int, add_noise: bool = False
+    ) -> SearchTree:
+        """Means-end tree: vanilla negamax mechanics, but leaves are evaluated by
+        the dual-head vector evaluator and the value is the alpha-blend. Carries
+        its own goal centroid + deadline origin. goal_mode stays False."""
+        if not self.meansend:
+            raise ValueError("init_tree_for_meansend requires meansend=True")
+        b = board.copy()
+        tree = SearchTree(b, goal_vec=np.asarray(goal_vec, np.float32),
+                          deadline_origin=int(deadline))
         value = self._expand_leaf(tree, tree.root, plies_from_root=0)
         tree.root.visit_count += 1
         tree.root.value_sum += value
@@ -181,7 +208,12 @@ class BatchedMCTS:
                     # working board is at the leaf — avoids Board.copy().
                     flip = tree.board.turn == chess.BLACK
                     legal_idxs = [move_to_index(m, flip) for m in tree.board.legal_moves]
-                    if self.goal_mode:
+                    goal_vec = None
+                    if self.meansend:
+                        planes = to_model_input(encode_board(tree.board))
+                        deadline = tree.deadline_origin - plies
+                        goal_vec = tree.goal_vec
+                    elif self.goal_mode:
                         goal, protagonist = self._ctx(tree)
                         remaining = goal.deadline - plies
                         goal_planes, _ = encode_goal(goal, remaining, protagonist)
@@ -194,15 +226,22 @@ class BatchedMCTS:
                         planes = to_model_input(encode_board(tree.board))
                         deadline = None
                     self._pop_to_root(tree, path)
-                    parked.append((tree, path, planes, legal_idxs, deadline))
+                    parked.append((tree, path, planes, legal_idxs, deadline, goal_vec))
         if parked:
             planes_batch = np.stack([p[2] for p in parked])
-            if self.goal_mode:
+            if self.meansend:
+                goal_vecs = np.stack([p[5] for p in parked])
+                deadlines = np.asarray([p[4] for p in parked], dtype=np.float32)
+                policies, v_win, v_goal = self.evaluator.evaluate_planes(
+                    planes_batch, goal_vecs, deadlines)
+                a = self.cfg.meansend_alpha
+                values = (1.0 - a) * v_win + a * (2.0 * v_goal - 1.0)
+            elif self.goal_mode:
                 deadlines = np.asarray([p[4] for p in parked], dtype=np.float32)
                 policies, values = self.evaluator.evaluate_planes(planes_batch, deadlines)
             else:
                 policies, values = self.evaluator.evaluate_planes(planes_batch)
-            for (tree, path, _planes, legal_idxs, _deadline), policy, value in zip(
+            for (tree, path, _planes, legal_idxs, _deadline, _gv), policy, value in zip(
                 parked, policies, values
             ):
                 self._expand_from_idxs(path[-1], legal_idxs, policy, float(value))
@@ -365,6 +404,16 @@ class BatchedMCTS:
         board = tree.board
         flip = board.turn == chess.BLACK
         idxs = [move_to_index(m, flip) for m in board.legal_moves]
+        if self.meansend:
+            remaining = tree.deadline_origin - plies_from_root
+            bp = to_model_input(encode_board(board))[None]
+            policies, v_win, v_goal = self.evaluator.evaluate_planes(
+                bp, tree.goal_vec[None], np.asarray([remaining], np.float32))
+            a = self.cfg.meansend_alpha
+            policy = policies[0]
+            value = float((1.0 - a) * v_win[0] + a * (2.0 * v_goal[0] - 1.0))
+            self._expand_from_idxs(node, idxs, policy, value)
+            return value
         if self.goal_mode:
             goal, protagonist = self._ctx(tree)
             remaining = goal.deadline - plies_from_root

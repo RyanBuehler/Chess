@@ -213,23 +213,42 @@ class _ClusterSideGoal:
     start_ply: int
     active_cluster: int
     active_vec: np.ndarray
+    explore: bool = False
 
     def is_terminal(self) -> bool:
         return self.active_cluster < 0
 
 
-def assign_cluster_goal(goalspace, win_vector, goal_cfg, rng) -> _ClusterSideGoal:
-    """Pick one side's goal: with prob win_floor (or always, if the goal space
-    isn't ready) the terminal objective; else a uniform-random discovered
-    cluster. Stage 4c replaces the uniform draw with the LP+win-value curriculum
-    and the epsilon-explore branch."""
+def assign_cluster_goal(goalspace, win_vector, goal_cfg, rng, curriculum=None) -> _ClusterSideGoal:
+    """Pick one side's goal with epsilon-explore + optional win-valued curriculum.
+
+    - If goalspace not ready: terminal.
+    - With prob epsilon: uniform-random cluster, explore=True (interventional).
+    - Else if curriculum given: curriculum.sample(rng) (-1 -> terminal, else cluster), explore=False.
+    - Else (no curriculum): win_floor then uniform cluster, explore=False.
+    """
     win_vector = np.asarray(win_vector, np.float32)
     ready = getattr(goalspace, "ready", False) and getattr(goalspace, "centroids", None) is not None
-    if not ready or rng.random() < goal_cfg.win_floor:
-        return _ClusterSideGoal(-1, win_vector, goal_cfg.deadline_max, 0, -1, win_vector)
-    c = int(rng.integers(goalspace.n_clusters))
-    vec = np.asarray(goalspace.centroid(c), np.float32)
-    return _ClusterSideGoal(c, vec, goal_cfg.goal_window, 0, c, vec)
+    if not ready:
+        return _ClusterSideGoal(-1, win_vector, goal_cfg.deadline_max, 0, -1, win_vector, explore=False)
+
+    def terminal():
+        return _ClusterSideGoal(-1, win_vector, goal_cfg.deadline_max, 0, -1, win_vector, explore=False)
+
+    def subgoal(c, explore):
+        vec = np.asarray(goalspace.centroid(c), np.float32)
+        return _ClusterSideGoal(c, vec, goal_cfg.goal_window, 0, c, vec, explore=explore)
+
+    eps = getattr(goal_cfg, "epsilon", 0.0)
+    if rng.random() < eps:                                  # interventional: uniform-random cluster
+        return subgoal(int(rng.integers(goalspace.n_clusters)), explore=True)
+    if curriculum is not None:                              # win-valued curriculum
+        c = curriculum.sample(rng)
+        return terminal() if c < 0 else subgoal(c, explore=False)
+    # no curriculum: win-floor then uniform
+    if rng.random() < goal_cfg.win_floor:
+        return terminal()
+    return subgoal(int(rng.integers(goalspace.n_clusters)), explore=False)
 
 
 def maybe_switch_cluster_to_terminal(side: _ClusterSideGoal, ply: int, win_vector, deadline_max: int) -> None:
@@ -542,6 +561,7 @@ class _MeansEndGame:
 def play_meansend_games_concurrent(
     evaluator_vector, mcts_cfg, sp_cfg, goal_cfg, goalspace, win_vector, rng,
     num_games, explore: bool = False, publisher=None, game_id_prefix: str = "",
+    curriculum=None,
 ) -> list:
     """Means-end concurrent self-play (v2). Each side pursues a discovered cluster
     goal (or the terminal objective) under the Plan 4a means-end MCTS; the switch
@@ -556,8 +576,8 @@ def play_meansend_games_concurrent(
         board = chess.Board()
         allow_resign = rng.random() >= sp_cfg.resign_playout_fraction
         sides = {
-            chess.WHITE: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng),
-            chess.BLACK: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng),
+            chess.WHITE: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng, curriculum),
+            chess.BLACK: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng, curriculum),
         }
         g = _MeansEndGame(board, sides, explore, allow_resign)
         g.game_id = f"{game_id_prefix}{slot}"
@@ -609,7 +629,7 @@ def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng
         g.board, idxs.astype(np.int32), counts.astype(np.int32), choice,
         protagonist=protagonist,
         cluster_active=side.active_cluster, cluster_assigned=side.assigned_cluster,
-        active_vec=side.active_vec, explore=g.explore,
+        active_vec=side.active_vec, explore=side.explore,
     )
 
     flip = g.board.turn == chess.BLACK

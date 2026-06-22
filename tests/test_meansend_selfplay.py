@@ -95,3 +95,23 @@ def test_meansend_selfplay_unfit_is_all_terminal():
     rec = recs[0][0]
     assert rec.has_cluster_goals()
     assert (rec.active_cluster == -1).all()   # unfit -> always terminal
+
+
+def test_epsilon_explore_marks_explore_and_uniform():
+    rng = np.random.default_rng(0)
+    seen_explore = 0
+    for _ in range(200):
+        g = assign_cluster_goal(ReadyGoalSpace(), WIN_VEC,
+                                GoalConfig(goal_mode="emergent", win_floor=0.0, epsilon=1.0),
+                                rng)
+        if g.explore: seen_explore += 1
+    assert seen_explore == 200   # epsilon=1 -> always explore
+
+
+def test_curriculum_used_when_not_exploring():
+    class Cur:
+        def sample(self, rng): return 2
+    g = assign_cluster_goal(ReadyGoalSpace(), WIN_VEC,
+                            GoalConfig(goal_mode="emergent", win_floor=0.0, epsilon=0.0),
+                            np.random.default_rng(0), curriculum=Cur())
+    assert g.active_cluster == 2 and g.explore is False

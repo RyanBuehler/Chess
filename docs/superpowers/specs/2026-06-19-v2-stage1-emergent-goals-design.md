@@ -23,13 +23,13 @@ subordinate to winning via potential-based shaping.*
 - **No goal→goal graph** (Stage 2). Win-value is per-goal vs the win outcome only.
 - **No manager/controller, no multi-goal plans** (Stage 3). One goal per side per game, as in v1.
 - **No continuous latent goal selection** (Stage 4). Goals are discretized clusters.
-- **No trunk redesign / no new heads.** Reuse the existing trunk and the existing **single
-  goal-conditioned value head**. CRITICAL (from reading v1 `network.py`): the goal-conditioned net
-  has exactly ONE value head — a *sigmoid* meaning `P(achieve goal)`. There is **no separate
-  `V(s,win)` head**; "win-value" is that same head evaluated with `g = WIN`. So `V(s,win) ≡
-  net(s, g=win)` and the goal value `V_goal(s,g) ≡ net(s, g)` are the *same head*, two different
-  goal inputs. What DOES change: the goal-conditioning *interface* (see "Goal conditioning"),
-  which alters the network shape → new `provenance.json`.
+- **No trunk redesign.** Reuse the existing ResNet trunk. v2 DOES add a goal-conditioning pathway
+  and uses a **DUAL value head** (see "Goal conditioning" — REVISED 2026-06-22): a tanh/MSE
+  game-outcome head off the unconditioned trunk for `V(s,win)` (identical to vanilla's head), plus a
+  sigmoid achievement head off the FiLM-conditioned features for `V_goal(s,g)`. This reverses the
+  earlier single-sigmoid-head plan: the v1 ablation showed the sigmoid achievement value costs ~500
+  Elo even for pure win-seeking, so the win objective must be the strong tanh/MSE target. Network
+  shape changes → new `provenance.json`.
 
 What changes vs v1: **goal discovery** (no hardcoded vocabulary), **causal win-valuation**, and the
 **means-end objective**. Everything else (one goal per side, switch-to-win on resolve, HER buffer,
@@ -80,9 +80,22 @@ small MLP and injected into the trunk output via **FiLM** (feature-wise affine m
 the policy and value heads. This touches every evaluator that currently builds goal planes — they
 switch from `(board_planes ⊕ goal_planes, deadline)` to `(board_planes, goal_vector)`.
 
-There is one (single) value head; it is **always goal-conditioned**. `V(s,win)` is simply that head
-under the **reserved WIN goal vector** `c_win` (a dedicated fixed vector, e.g. all-zeros or a
-learned win embedding — NOT a cluster), and `V_goal(s,g)` is the same head under `c_g`.
+**DESIGN REVISION (2026-06-22), driven by the v1 ablation:** the ablation showed the v1
+single-sigmoid-achievement value head costs **~500 Elo even when the goal is always WIN**
+(`vanilla 754` vs `always-win 230`; see decision log). The sigmoid achievement-probability value is
+the prime suspect. So v2 uses a **DUAL value head**, not one:
+
+- **WIN value head — tanh/MSE game-outcome**, read from the **UNCONDITIONED trunk** (winning is
+  goal-agnostic). This is exactly vanilla's value head: `V(s,win) = tanh_head(trunk(s))` in [-1,1].
+  It is the RL training target, so v2's win objective is represented identically to the strong
+  vanilla baseline — *not* as a sigmoid achievement probability.
+- **GOAL achievement head — sigmoid/BCE**, read from the **FiLM-CONDITIONED features**:
+  `V_goal(s,g) = sigmoid_head(FiLM(trunk(s), c_g))` in [0,1] = `P(achieve g)`. Used ONLY for
+  sub-goal shaping, never as the win objective.
+
+Both heads come from one forward pass (no double-eval). The reserved WIN goal vector `c_win` is no
+longer needed for the win *value* (the tanh head is goal-agnostic); the policy and goal head still
+take a goal vector `c_g`.
 
 **Coexistence (not in-place removal).** The vector pathway is added as a **new conditioning mode**
 (`goal_cond="vector"`) alongside v1's existing `planes` mode, rather than ripping `GOAL_PLANES` out.
@@ -107,20 +120,22 @@ Stage 1 estimates win-value **interventionally**:
 
 ### Means-end objective
 
-While a side is assigned goal `g` (recall: one head, so both quantities below are that head under
-different goal vectors — `V(s,win) = net(s, c_win)`, `V_goal(s,g) = net(s, c_g)`):
+While a side is assigned goal `g` (with the DUAL head above: `V(s,win)` is the tanh outcome head,
+`V_goal(s,g)` the sigmoid achievement head — both from one forward):
 
-- **RL value target = `V(s, win)` = `net(s, c_win)`** (protagonist win-value). Default `α = 0`:
-  winning is the objective, always. Resignation gate **on**.
+- **RL value target = `V(s, win)` = tanh outcome head** (protagonist game outcome, like vanilla).
+  Default `α = 0`: winning is the objective, always. Resignation gate **on**. This is the change
+  that should remove the ~500 Elo machinery tax — the win objective is now the strong tanh/MSE
+  target, not a sigmoid achievement probability.
 - **Potential-based shaping** adds reward `F = γ_shape · (Φ(s′; g) − Φ(s; g))` with potential
-  `Φ(s; g) = V_goal(s, g) = net(s, c_g)`. By the potential-based-shaping theorem this cannot make
-  the agent sacrifice the game for the goal — it only accelerates credit toward goal progress.
-  Default `γ_shape = 0.25` (× the per-step discount, standard PBS form). **Cost:** computing both
-  `net(s,c_win)` and `net(s,c_g)` is two value evaluations of the one head per shaped step; batch
-  them in one forward (stack the two goal vectors) to keep it ~1 forward.
+  `Φ(s; g) = V_goal(s, g)` (the sigmoid goal head). By the potential-based-shaping theorem this
+  cannot make the agent sacrifice the game for the goal — it only accelerates credit toward goal
+  progress. Default `γ_shape = 0.25` (× the per-step discount, standard PBS form).
 - **α-blend knob (for sweeps):** the training value target is
   `(1−α)·V(s,win) + α·V_goal(s,g)`. `α = 1` reproduces v1 speedrunning; `α = 0` is pure
-  means-end. The α=1→0 sweep is the core mechanistic experiment.
+  means-end. The α=1→0 sweep is the core mechanistic experiment. (Note `V_goal` is [0,1] and
+  `V(s,win)` is [-1,1]; the blend maps `V_goal` to [-1,1] via `2·V_goal−1` so the targets share a
+  scale.)
 
 ### Curriculum
 
@@ -141,8 +156,8 @@ novelty/LP).
 | `chessrl/goals/curriculum.py` | modify | add `γ·win_value(g)` term. |
 | `chessrl/goals/repertoire.py` | retire/bypass | `_CANDIDATE_KINDS` no longer the goal source. |
 | `chessrl/goals/verifier.py`, `features.py`, `encoding.py` | retire/bypass for clusters | predicate verifiers + `GOAL_PLANES` replaced by centroid-distance achievement + vector conditioning (WIN keeps a real outcome check). |
-| `chessrl/model/network.py` | modify | FiLM goal-conditioning from `(centroid ⊕ deadline)` vector; remove `GOAL_PLANES` input channels; one sigmoid head stays; reserved `c_win`. Update `GoalNetEvaluator`/`BatchedGoalNetEvaluator` to the vector interface. |
-| self-play objective (`chessrl/selfplay/…`) | modify | `V(s,win)=net(s,c_win)` target + PBS shaping `Φ=net(s,c_g)` (batch the two goal vectors) + α knob; gate on. |
+| `chessrl/model/network.py` | modify | FiLM goal-conditioning from `(centroid ⊕ deadline)` vector (coexists with v1 planes mode); **DUAL value head**: tanh outcome head off unconditioned trunk (`V(s,win)`) + sigmoid achievement head off conditioned features (`V_goal(s,g)`); policy off conditioned features. |
+| self-play objective (`chessrl/selfplay/…`) | modify | RL target = tanh `V(s,win)` + PBS shaping `Φ=V_goal(s,g)` (sigmoid head) + α knob; gate on. |
 | `experiments/v2-stage1.yaml` | **new** | `goal_mode: emergent`, ε/K/α/γ_shape config. |
 | eval/UI | small add | render cluster-id + win-value in the live aux; backfill vanilla curve. |
 
@@ -203,9 +218,11 @@ vanilla.**
 - `assignment`: ε-Bernoulli rate over many draws; explore picks uniform over live clusters.
 - shaping: PBS form; net shaping = 0 along a constant-`Φ` trajectory; α=0 target equals `V(win)`,
   α=1 equals `V_goal`.
-- conditioning: the single value head's output varies with the goal vector (FiLM actually
-  conditions — `net(s,c_a) ≠ net(s,c_b)` for distinct centroids); `net(s,c_win)` is stable for the
-  reserved win vector; forward accepts `(board_planes, goal_vector)` with no `GOAL_PLANES` channels.
+- conditioning (DUAL head): the **tanh win head is goal-agnostic** — `V(s,win)` is invariant to the
+  goal vector (FiLM does not feed it); the **sigmoid goal head varies** with the goal vector (FiLM
+  conditions — `V_goal(s,c_a) ≠ V_goal(s,c_b)` for distinct centroids); forward accepts
+  `(board_planes, goal_vector)` and returns `(policy, v_win tanh, v_goal sigmoid)`; vector mode uses
+  no `GOAL_PLANES` channels.
 - Integration: a short smoke run produces clusters, explore games, non-trivial win-values, and a
   rising metric, without crashing on resume.
 - UI: live aux renders cluster-id + win-value (Playwright slow gate, per project rule).

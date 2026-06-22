@@ -19,3 +19,18 @@ def test_vector_player_plays_legal_move(tmp_path):
     mv = p.play(board)
     assert mv in board.legal_moves
     assert hasattr(p, "_last_root_q") and isinstance(p._last_thoughts, list)
+
+
+def test_factory_routes_emergent_to_vector_player(tmp_path):
+    import dataclasses
+    from chessrl.config.config import RunConfig, GoalConfig, NetworkConfig, EvalConfig
+    from chessrl.evaluation.daemon import _default_agent_factory
+    from chessrl.evaluation.players import VectorGoalMCTSPlayer
+    ckpt, ncfg = _save_vector_ckpt(tmp_path)
+    run_cfg = RunConfig(
+        network=NetworkConfig(blocks=2, filters=16, goal_cond="vector"),
+        goal=GoalConfig(goal_mode="emergent"),
+    )
+    cfg = EvalConfig(agent_simulations=8)
+    agent = _default_agent_factory("v2@0", ckpt, run_cfg, cfg)
+    assert isinstance(agent, VectorGoalMCTSPlayer)

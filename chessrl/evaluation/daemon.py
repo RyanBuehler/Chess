@@ -81,9 +81,16 @@ def _build_stockfish_players(cfg: EvalConfig) -> list:
 
 
 def _default_agent_factory(agent_name, ckpt_path, run_cfg, cfg):
-    """Build the agent player for a checkpoint. Goal arms (goal_mode != none)
-    are evaluated by conditioning on g=win via GoalNetMCTSPlayer (spec sec 15);
-    vanilla uses the plain NetMCTSPlayer. Shared by the daemon and the sweep."""
+    """Build the agent player for a checkpoint. Emergent (v2) arm uses
+    VectorGoalMCTSPlayer; v1 goal arms (goal_mode != none) use GoalNetMCTSPlayer
+    (spec sec 15); vanilla uses the plain NetMCTSPlayer. Shared by the daemon
+    and the sweep."""
+    if run_cfg.goal.goal_mode == "emergent":
+        from chessrl.evaluation.players import VectorGoalMCTSPlayer
+
+        return VectorGoalMCTSPlayer(
+            agent_name, ckpt_path, run_cfg.network, cfg.agent_simulations, device="cpu",
+        )
     if run_cfg.goal.goal_mode != "none":
         from chessrl.evaluation.players import GoalNetMCTSPlayer
 

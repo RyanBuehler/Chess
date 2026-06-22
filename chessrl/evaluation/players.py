@@ -234,6 +234,47 @@ class GoalNetMCTSPlayer:
         return index_to_move(best_idx, flip, board)
 
 
+class VectorGoalMCTSPlayer:
+    """The agent for the v2 EMERGENT (vector dual-head) arm, evaluated by playing
+    to WIN: terminal pursuit conditioned on the net's reserved ``win_vector`` with
+    the means-end MCTS at alpha=0 (leaf value = the tanh terminal-reward head, no
+    goal shaping). Interface matches NetMCTSPlayer."""
+
+    def __init__(self, name, checkpoint_path, network_cfg, simulations, device="cpu", seed=0):
+        from chessrl.config.config import MCTSConfig
+        from chessrl.mcts.batched import BatchedMCTS
+        from chessrl.model.network import VectorGoalNetEvaluator
+
+        self.name = name
+        self._eval = VectorGoalNetEvaluator.from_checkpoint(
+            checkpoint_path, network_cfg, device=device
+        )
+        self._win_vec = self._eval.net.win_vector.detach().cpu().numpy()
+        self._cfg = MCTSConfig(simulations=simulations, meansend_alpha=0.0)
+        self._mcts = BatchedMCTS(
+            self._eval, self._cfg, rng=np.random.default_rng(seed), meansend=True
+        )
+        self._deadline = 60   # terminal-pursuit horizon; at alpha=0 only feeds the FiLM scalar
+
+    def play(self, board: chess.Board) -> chess.Move:
+        from chessrl.chess_env.moves import index_to_move
+
+        tree = self._mcts.init_tree_for_meansend(
+            board, self._win_vec, self._deadline, add_noise=False
+        )
+        self._mcts.run(tree)
+        visits = self._mcts.visit_counts(tree)
+        best_idx = max(visits, key=visits.get)
+        flip = board.turn == chess.BLACK
+        total = float(sum(visits.values())) or 1.0
+        top = sorted(visits.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        self._last_thoughts = [
+            [index_to_move(idx, flip, board).uci(), c / total] for idx, c in top
+        ]
+        self._last_root_q = float(self._mcts.root_q(tree))
+        return index_to_move(best_idx, flip, board)
+
+
 class StockfishError(RuntimeError):
     pass
 

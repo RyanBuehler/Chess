@@ -507,3 +507,132 @@ def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_
         "z": int(g.z) if g.done else None,
         "aux": _goal_aux(g, protagonist) if protagonist is not None else [],
     })
+
+
+# ===========================================================================
+# Means-end concurrent self-play (v2, Stage 4b).
+#
+# Advances num_games games in lockstep under a single means-end BatchedMCTS
+# (Plan 4a). Each side is assigned a cluster goal (or terminal) at game start
+# via assign_cluster_goal; the active goal switches to the terminal objective
+# after the deadline elapses (maybe_switch_cluster_to_terminal). Records carry
+# Plan 3 cluster columns (cluster_active, cluster_assigned, active_vec).
+# ===========================================================================
+
+
+class _MeansEndGame:
+    __slots__ = ("builder", "board", "sides", "explore", "allow_resign",
+                 "resign_streak", "ply", "done", "z", "tree", "game_id", "last_pv")
+
+    def __init__(self, board, sides, explore, allow_resign):
+        self.builder = RecordBuilder()
+        self.board = board
+        self.sides = sides
+        self.explore = explore
+        self.allow_resign = allow_resign
+        self.resign_streak = {chess.WHITE: 0, chess.BLACK: 0}
+        self.ply = 0
+        self.done = False
+        self.z = 0
+        self.tree = None
+        self.game_id = ""
+        self.last_pv = {chess.WHITE: None, chess.BLACK: None}
+
+
+def play_meansend_games_concurrent(
+    evaluator_vector, mcts_cfg, sp_cfg, goal_cfg, goalspace, win_vector, rng,
+    num_games, explore: bool = False, publisher=None, game_id_prefix: str = "",
+) -> list:
+    """Means-end concurrent self-play (v2). Each side pursues a discovered cluster
+    goal (or the terminal objective) under the Plan 4a means-end MCTS; the switch
+    to terminal pursuit is deadline-based. Writes Plan 3 cluster records. Returns
+    list[(GameRecord, final_board, z, meta)] in slot order."""
+    publisher = publisher or NullPublisher()
+    win_vector = np.asarray(win_vector, np.float32)
+    mcts = BatchedMCTS(evaluator_vector, mcts_cfg, rng, meansend=True)
+
+    games: list[_MeansEndGame] = []
+    for slot in range(num_games):
+        board = chess.Board()
+        allow_resign = rng.random() >= sp_cfg.resign_playout_fraction
+        sides = {
+            chess.WHITE: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng),
+            chess.BLACK: assign_cluster_goal(goalspace, win_vector, goal_cfg, rng),
+        }
+        g = _MeansEndGame(board, sides, explore, allow_resign)
+        g.game_id = f"{game_id_prefix}{slot}"
+        games.append(g)
+
+    for g in games:
+        _goal_check_pre_move_termination(g, sp_cfg)
+
+    while any(not g.done for g in games):
+        active = [g for g in games if not g.done]
+        for g in active:
+            side = g.sides[g.board.turn]
+            if side.is_terminal():
+                remaining = max(1, sp_cfg.ply_cap - g.ply)
+            else:
+                remaining = max(1, side.deadline - (g.ply - side.start_ply))
+            g.tree = mcts.init_tree_for_meansend(g.board, side.active_vec, remaining, add_noise=True)
+        trees = [g.tree for g in active]
+        while any(t.root.visit_count < mcts_cfg.simulations + 1 for t in trees):
+            mcts.step_round(trees)
+        for g in active:
+            _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher)
+
+    results = []
+    for g in games:
+        rec = g.builder.finalize(g.z)
+        wpf = float((rec.active_cluster == -1).mean()) if rec.has_cluster_goals() and len(rec) else 0.0
+        meta = {"plies": len(rec), "z": g.z, "resigned": False,
+                "playout": not g.allow_resign, "would_resign": False, "fp": False,
+                "win_ply_fraction": wpf}
+        results.append((rec, g.board, g.z, meta))
+    return results
+
+
+def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher) -> None:
+    protagonist = g.board.turn
+    side = g.sides[protagonist]
+    visits = mcts.visit_counts(g.tree)
+    root_q = mcts.root_q(g.tree)
+    g.last_pv[protagonist] = float(root_q)
+    idxs = np.fromiter(visits.keys(), dtype=np.int64)
+    counts = np.fromiter(visits.values(), dtype=np.float64)
+    if g.ply < mcts_cfg.temperature_moves:
+        choice = int(rng.choice(idxs, p=counts / counts.sum()))
+    else:
+        choice = int(idxs[counts.argmax()])
+
+    g.builder.add(
+        g.board, idxs.astype(np.int32), counts.astype(np.int32), choice,
+        protagonist=protagonist,
+        cluster_active=side.active_cluster, cluster_assigned=side.assigned_cluster,
+        active_vec=side.active_vec, explore=g.explore,
+    )
+
+    flip = g.board.turn == chess.BLACK
+    chosen_move = index_to_move(choice, flip, g.board)
+    total = float(counts.sum())
+    order = np.argsort(counts)[::-1][:5]
+    top_moves = [[index_to_move(int(idxs[k]), flip, g.board).uci(), float(counts[k] / total)] for k in order]
+
+    if side.is_terminal():
+        if root_q < sp_cfg.resign_threshold:
+            g.resign_streak[protagonist] += 1
+            if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
+                g.z = -1 if protagonist == chess.WHITE else 1
+                g.done = True
+                _publish_move(publisher, g, chosen_move, root_q, top_moves)
+                return
+        else:
+            g.resign_streak[protagonist] = 0
+    else:
+        g.resign_streak[protagonist] = 0
+
+    g.board.push(index_to_move(choice, protagonist == chess.BLACK, g.board))
+    g.ply += 1
+    maybe_switch_cluster_to_terminal(side, g.ply, win_vector, goal_cfg.deadline_max)
+    _goal_check_pre_move_termination(g, sp_cfg)
+    _publish_move(publisher, g, chosen_move, root_q, top_moves)

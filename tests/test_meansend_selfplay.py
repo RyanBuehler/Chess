@@ -1,7 +1,10 @@
 import numpy as np
-from chessrl.config.config import GoalConfig
+import chess
+from chessrl.config.config import GoalConfig, MCTSConfig, SelfPlayConfig
+from chessrl.chess_env.moves import NUM_ACTIONS
 from chessrl.selfplay.concurrent import (
     _ClusterSideGoal, assign_cluster_goal, maybe_switch_cluster_to_terminal,
+    play_meansend_games_concurrent,
 )
 
 
@@ -54,3 +57,41 @@ def test_deadline_switch_to_terminal():
     maybe_switch_cluster_to_terminal(g, ply=3, win_vector=WIN_VEC, deadline_max=60)
     assert g.is_terminal()              # 3 >= 3, switched
     assert np.allclose(g.active_vec, WIN_VEC)
+
+
+class FakeVectorEval:
+    """Dual-head batched vector evaluator. evaluate_planes(planes, goal_vecs,
+    deadlines) -> (policies uniform, v_win, v_goal)."""
+    def evaluate_planes(self, planes, goal_vecs, deadlines):
+        n = planes.shape[0]
+        pol = np.full((n, NUM_ACTIONS), 1.0 / NUM_ACTIONS, np.float32)
+        return pol, np.zeros(n, np.float32), np.full(n, 0.5, np.float32)
+
+
+def test_meansend_selfplay_produces_cluster_records():
+    gs = ReadyGoalSpace()
+    recs = play_meansend_games_concurrent(
+        FakeVectorEval(), MCTSConfig(simulations=8, leaves_per_tree=1),
+        SelfPlayConfig(ply_cap=6, resign_playout_fraction=1.0),
+        GoalConfig(goal_mode="emergent", win_floor=0.0, goal_window=2, deadline_max=60),
+        gs, np.full(4, -1.0, np.float32), np.random.default_rng(0), num_games=2,
+    )
+    assert len(recs) == 2
+    for rec, board, z, meta in recs:
+        assert rec.has_cluster_goals()
+        assert rec.active_vec.shape[1] == 4
+        assert "win_ply_fraction" in meta
+        # deadline switch (goal_window=2) means later plies are terminal (-1)
+        assert (rec.active_cluster == -1).any()
+
+
+def test_meansend_selfplay_unfit_is_all_terminal():
+    recs = play_meansend_games_concurrent(
+        FakeVectorEval(), MCTSConfig(simulations=8, leaves_per_tree=1),
+        SelfPlayConfig(ply_cap=4, resign_playout_fraction=1.0),
+        GoalConfig(goal_mode="emergent", win_floor=0.0, goal_window=2, deadline_max=60),
+        UnfitGoalSpace(), np.full(4, -1.0, np.float32), np.random.default_rng(0), num_games=1,
+    )
+    rec = recs[0][0]
+    assert rec.has_cluster_goals()
+    assert (rec.active_cluster == -1).all()   # unfit -> always terminal

@@ -85,6 +85,7 @@ class GoalConfig:
     reservoir_size: int = 20000      # capacity of the delta reservoir
     min_reservoir: int = 5000        # deltas required before the goal space is "ready"
     goal_window: int = 8             # plies over which a state-delta is measured
+    delta_samples_per_game: int = 8  # deltas harvested per game into the reservoir (was hardcoded max_samples=8)
     epsilon: float = 0.15            # fraction of assignments that are uniform-random (interventional)
     gamma_winvalue: float = 1.0      # curriculum weight on win_value(g)
 

@@ -409,7 +409,7 @@ def main(argv=None) -> Path:
                 added, positions = ingest_new_games(
                     run_dir, buffer, ingested,
                     on_record=lambda rec: (
-                        observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=8, rng=rng),
+                        observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=cfg.goal.delta_samples_per_game, rng=rng),
                         update_winvalue_from_record(winvalue, rec),
                     ),
                 )
@@ -542,7 +542,7 @@ def main(argv=None) -> Path:
             added, positions = ingest_new_games(
                 run_dir, buffer, ingested,
                 on_record=lambda rec: (
-                    observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=8, rng=rng),
+                    observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=cfg.goal.delta_samples_per_game, rng=rng),
                     update_winvalue_from_record(winvalue, rec),
                 ),
             )

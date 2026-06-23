@@ -146,3 +146,29 @@ def test_positive_requires_tau():
         f"Cluster 1 is reached but not tau-achieved; should not be a positive. "
         f"Got: {positives_cluster1}"
     )
+
+
+def test_embeds_states_once_per_game():
+    """Perf regression guard. The hot path must embed each game's states ONCE
+    (one batched forward pass), NOT once per (i, t) delta pair. The per-pair
+    version was O(T * deadline) un-batched forward passes (~48k/game, ~32 s/game)
+    and wedged the first real v2 run for hours when the first cluster fit
+    triggered a full-buffer rebuild. Equivalence of the batched deltas is
+    covered by the content tests above (FakeEmbedder is batch-independent)."""
+
+    class CountingEmbedder(FakeEmbedder):
+        def __init__(self):
+            self.calls = 0
+            self.boards_seen = 0
+
+        def embed_boards(self, boards):
+            self.calls += 1
+            self.boards_seen += len(boards)
+            return super().embed_boards(boards)
+
+    rec = _game(n=6)
+    states = reconstruct_states(rec)
+    emb = CountingEmbedder()
+    cluster_goal_samples(rec, states, emb, FakeGoalSpace(), np.random.default_rng(0))
+    assert emb.calls == 1, f"expected ONE batched embed_boards call, got {emb.calls}"
+    assert emb.boards_seen == len(states)   # embedded every state exactly once

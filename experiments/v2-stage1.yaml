@@ -36,8 +36,9 @@ goal:
   cluster_k: 48
   refresh_every: 2000
   reservoir_size: 20000
-  min_reservoir: 5000
+  min_reservoir: 1500        # first cluster fit ~95 games (faster watchable sub-goals + earlier training); refit every refresh_every replaces the coarse first generation
   goal_window: 8
+  delta_samples_per_game: 16 # deltas harvested per game; with min_reservoir=1500 -> ~95 games of diversity behind the first fit
   win_floor: 0.2
   deadline_max: 60
   epsilon: 0.15

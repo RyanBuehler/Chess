@@ -27,16 +27,10 @@ class ClusterGoalSample:
     v_goal_weight: float
 
 
-def _delta(embedder, states, i, t):
-    e = embedder.embed_boards([states[i], states[t]])
-    return (e[1] - e[0]).astype(np.float32)
-
-
-def _achieved_cluster(embedder, goalspace, states, i, cluster, rem) -> bool:
-    T = len(states) - 1
+def _achieved_cluster(goalspace, emb, i, cluster, rem, T) -> bool:
     end = min(i + rem, T)
     for t in range(i + 1, end + 1):
-        if goalspace.achieved(_delta(embedder, states, i, t), cluster):
+        if goalspace.achieved((emb[t] - emb[i]).astype(np.float32), cluster):
             return True
     return False
 
@@ -51,6 +45,13 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
     out: list[ClusterGoalSample] = []
     T_ = len(rec)
     k_clusters = goalspace.centroids.shape[0]
+    # Embed every state ONCE (a single batched forward pass); all window deltas
+    # are then vector subtractions emb[t]-emb[i]. The previous per-(i,t)-pair
+    # embed_boards call was O(T_ * deadline_max) un-batched forward passes
+    # (~48k/game, ~32 s/game) and wedged the first real v2 run for hours when
+    # the first cluster fit triggered a full-buffer rebuild. Numerically
+    # identical: the encoder is batch-independent in eval mode.
+    emb = np.asarray(embedder.embed_boards(states), np.float32)
     for i in range(T_):
         rem = min(deadline_max, T_ - i)
         active_cluster = int(rec.active_cluster[i])
@@ -61,7 +62,7 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
         # loss (weight 0) there: training V_goal(win_vector) -> 0 would teach a spurious
         # "never achieved" signal and drag down the means-end value during terminal pursuit.
         # The win-head signal (v_win, mask 1) is always kept. (Adversarial review Bug B/F.)
-        ach = active_cluster >= 0 and _achieved_cluster(embedder, goalspace, states, i, active_cluster, rem)
+        ach = active_cluster >= 0 and _achieved_cluster(goalspace, emb, i, active_cluster, rem, T_)
         out.append(ClusterGoalSample(
             ply=i, goal_vec=active_vec, cluster=active_cluster, remaining=rem,
             v_win=float(rec.outcomes[i]), v_win_mask=1.0,
@@ -77,7 +78,7 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
         reached = set()
         achieved_set = set()
         for t in range(i + 1, min(i + rem, T_) + 1):
-            delta_t = _delta(embedder, states, i, t)
+            delta_t = (emb[t] - emb[i]).astype(np.float32)
             c = goalspace.assign(delta_t)
             reached.add(c)
             if goalspace.achieved(delta_t, c):

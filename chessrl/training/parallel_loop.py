@@ -104,6 +104,29 @@ def observe_game_deltas(goalspace, rec, embedder, max_samples: int, rng) -> None
         goalspace.observe_delta(emb[half + k] - emb[k])
 
 
+def regenerate_cluster_labels(run_dir, goalspace, embedder, goal_window, sample: int = 200) -> int:
+    """Characterize the freshly-fit clusters from a sample of recent games and
+    persist goalspace/cluster_labels.json for the LIVE view (inline label + hover
+    fingerprint). Descriptive only — callers must guard so a failure here never
+    interrupts training. Returns the number of clusters labelled."""
+    from chessrl.selfplay.records import GameRecord
+    from chessrl.goals.cluster_labels import characterize_clusters, save_cluster_labels
+
+    files = sorted((Path(run_dir) / "games").glob("*.npz"),
+                   key=lambda p: p.stat().st_mtime)[-sample:]
+    states_per_game = []
+    for f in files:
+        try:
+            rec = GameRecord.load(f)
+        except Exception:
+            continue
+        if rec.has_cluster_goals():
+            states_per_game.append(reconstruct_states(rec))
+    labels = characterize_clusters(states_per_game, embedder, goalspace, goal_window)
+    save_cluster_labels(labels, Path(run_dir) / GOALSPACE_DIR)
+    return len(labels)
+
+
 def make_run_dir(cfg: RunConfig, runs_root, run_dir_name: str | None = None) -> Path:
     """Create a fresh run dir. By default ``runs_root/<run_name>-<timestamp>``.
     When ``run_dir_name`` is given the dir is named EXACTLY that (no timestamp),
@@ -431,6 +454,13 @@ def main(argv=None) -> Path:
                         deadline_max=cfg.goal.deadline_max,
                     )
                     goalspace.save(run_dir / GOALSPACE_DIR)
+                    # Describe the freshly-fit clusters for the LIVE view (best-effort;
+                    # a descriptive-label failure must never interrupt training).
+                    try:
+                        regenerate_cluster_labels(run_dir, goalspace, frozen_encoder,
+                                                  cfg.goal.goal_window)
+                    except Exception:
+                        pass
                     # Refit reassigns arbitrary cluster ids, so win-value stats keyed
                     # by the OLD ids are meaningless now — reset + persist so workers
                     # rebuild a fresh curriculum (adversarial review Bug 4, the

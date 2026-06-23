@@ -17,6 +17,7 @@ from chessrl.config.config import RunConfig
 from chessrl.goals.assignment import make_assigner
 from chessrl.goals.curriculum import Curriculum
 from chessrl.goals.repertoire import Repertoire
+from chessrl.goals.cluster_labels import load_cluster_labels
 from chessrl.goals.goalspace import GoalSpace
 from chessrl.goals.winvalue import ClusterCurriculum, WinValueEstimator
 from chessrl.model.network import (
@@ -177,7 +178,7 @@ def _run_goal_batch(
 def run_one_batch(
     run_dir, worker_id: int, evaluator, cfg: RunConfig,
     rng: np.random.Generator, start_counter: int, publisher=None, batch_index: int = 0,
-    curriculum=None, goalspace=None, wv_curriculum=None,
+    curriculum=None, goalspace=None, wv_curriculum=None, cluster_labels=None,
 ) -> int:
     """Play one batch of concurrent_games games, persist them, append meta.
     Returns the next free counter. Emergent mode uses play_meansend_games_concurrent
@@ -194,6 +195,7 @@ def run_one_batch(
             publisher=publisher,
             game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
             curriculum=wv_curriculum,
+            cluster_labels=cluster_labels,
         )
     elif cfg.goal.goal_mode != "none":
         results = _run_goal_batch(
@@ -248,6 +250,12 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
     wv_path = run_dir / WINVALUE_FILE
     wv_curriculum = _load_winvalue_curriculum(run_dir, cfg, goalspace)
     wv_mtime = wv_path.stat().st_mtime if wv_path.exists() else None
+    # Cluster labels (post-hoc descriptions for the LIVE view); reloaded when
+    # cluster_labels.json mtime changes (written just after meta.json at refit, so
+    # watched on its own mtime to avoid a write-order race with the goalspace save).
+    cl_path = run_dir / GOALSPACE_DIR / "cluster_labels.json"
+    cluster_labels = load_cluster_labels(run_dir / GOALSPACE_DIR)
+    cl_mtime = cl_path.stat().st_mtime if cl_path.exists() else None
 
     publisher = NullPublisher()
     if cfg.selfplay.feed_port > 0:
@@ -312,10 +320,20 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                         wv_mtime = m
                 except Exception:
                     pass
+            # Reload cluster labels when cluster_labels.json mtime changes (emergent).
+            if cfg.goal.goal_mode == "emergent" and cl_path.exists():
+                try:
+                    m = cl_path.stat().st_mtime
+                    if m != cl_mtime:
+                        cluster_labels = load_cluster_labels(run_dir / GOALSPACE_DIR)
+                        cl_mtime = m
+                except Exception:
+                    pass
             counter = run_one_batch(
                 run_dir, worker_id, evaluator, cfg, rng, counter,
                 publisher=publisher, batch_index=batch_index, curriculum=curriculum,
                 goalspace=goalspace, wv_curriculum=wv_curriculum,
+                cluster_labels=cluster_labels,
             )
             batch_index += 1
             # tight loop is fine; the sentinel check between batches paces shutdown.

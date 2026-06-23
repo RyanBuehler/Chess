@@ -1,10 +1,48 @@
 """Test that means-end concurrent self-play publishes live-feed frames with
 cluster-goal aux (both-sides table: cols, to_move, rows with 'goal' label)."""
+import chess
 import numpy as np
 
 from chessrl.config.config import GoalConfig, MCTSConfig, SelfPlayConfig
-from chessrl.selfplay.concurrent import play_meansend_games_concurrent
+from chessrl.selfplay.concurrent import play_meansend_games_concurrent, _meansend_aux
 from tests.test_meansend_selfplay import FakeVectorEval, ReadyGoalSpace
+
+
+class _Side:
+    def __init__(self, active_cluster):
+        self.active_cluster = active_cluster
+    def is_terminal(self):
+        return self.active_cluster < 0
+
+
+class _Game:
+    def __init__(self, w_cluster, b_cluster):
+        self.sides = {chess.WHITE: _Side(w_cluster), chess.BLACK: _Side(b_cluster)}
+
+
+def test_aux_shows_label_inline_and_tips_for_hover():
+    labels = {
+        3: {"label": "win material (+1.1)",
+            "features": {"material": 1.1, "captured": 1.0}, "n": 20},
+    }
+    g = _Game(w_cluster=3, b_cluster=7)   # cluster 7 has no label
+    aux = _meansend_aux(g, chess.WHITE, estimator=None, cluster_labels=labels)
+    goal_row = aux["rows"][0]
+    assert goal_row[1] == "cluster 3 — win material (+1.1)"   # White: inline label
+    assert goal_row[2] == "cluster 7"                          # Black: no label -> bare id
+    # hover detail for the goal cell
+    assert aux["tips"]["White"]["cluster"] == 3
+    assert aux["tips"]["White"]["features"]["material"] == 1.1
+    assert aux["tips"]["Black"] is None                        # no label -> no tip
+
+
+def test_aux_terminal_side_has_no_tip():
+    g = _Game(w_cluster=-1, b_cluster=3)   # White terminal (pursuing win)
+    labels = {3: {"label": "castle", "features": {"castled": 1.0}, "n": 9}}
+    aux = _meansend_aux(g, chess.BLACK, estimator=None, cluster_labels=labels)
+    assert aux["rows"][0][1] == "win"
+    assert aux["tips"]["White"] is None
+    assert aux["tips"]["Black"]["label"] == "castle"
 
 
 class _CapturingPublisher:

@@ -137,10 +137,37 @@ input[type="range"] { accent-color: var(--accent); }
 #live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .75rem; margin-top: .75rem; }
 .live-cell { padding: .5rem; transition: opacity .3s; }
 .live-title { font-size: 11px; color: var(--muted); margin-bottom: .3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live-aux { display: grid; grid-template-columns: auto 1fr; gap: 0 .4rem; margin: .35rem 0 0; font-family: var(--mono); font-size: 10px; }
+.live-aux { margin: .35rem 0 0; font-family: var(--mono); font-size: 10px; }
 .live-aux:empty { display: none; }
-.live-aux dt { color: var(--muted); white-space: nowrap; }
-.live-aux dd { margin: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* legacy key/value list form */
+.live-aux dt { display: inline; color: var(--muted); white-space: nowrap; }
+.live-aux dd { display: inline; margin: 0 .5rem 0 .25rem; color: var(--text); }
+/* two-side table form (White | Black goals); to-move column highlighted */
+.aux-table { border-collapse: collapse; width: 100%; font-size: 9px; line-height: 1.5; }
+.aux-table th, .aux-table td { text-align: left; padding: 0 .3rem 0 0; white-space: nowrap; }
+.aux-table th { color: var(--muted); font-weight: normal; }
+.aux-table td.aux-k { color: var(--muted); }
+.aux-table td:not(.aux-k) { overflow: hidden; text-overflow: ellipsis; max-width: 72px; }
+.aux-table .tomove { color: #7aa2f7; font-weight: 700; }
+
+/* Cluster goal hover tooltip (LIVE): the goal cell shows the chess-feature label
+   inline; hovering reveals the discovered cluster's delta fingerprint. */
+.aux-table td.aux-tip-host { position: relative; overflow: visible; }
+.aux-tip-host .aux-cell-text {
+  display: inline-block; max-width: 72px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: help;
+  border-bottom: 1px dotted var(--muted);
+}
+.aux-tip {
+  display: none; position: absolute; z-index: 30; left: 0; top: 100%; margin-top: 3px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 4px;
+  padding: .35rem .45rem; min-width: 120px; white-space: nowrap;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .55);
+}
+.aux-tip-host:hover .aux-tip { display: block; }
+.aux-tip-label { color: #7aa2f7; font-weight: 700; margin-bottom: .2rem; }
+.aux-tip-row { display: flex; justify-content: space-between; gap: 1rem; color: var(--text); }
+.aux-tip-foot { color: var(--muted); margin-top: .2rem; }
 
 /* Eval bar (play). */
 .eval-bar { width: 22px; height: 440px; background: #11121c; border: 1px solid var(--border); border-radius: 6px; position: relative; overflow: hidden; }

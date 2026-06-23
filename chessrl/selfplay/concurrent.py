@@ -528,18 +528,26 @@ def _publish_goal_move(publisher, g: _GoalGame, chosen_move, root_q: float, top_
     })
 
 
-def _meansend_aux(g, protagonist, estimator=None):
+def _meansend_aux(g, protagonist, estimator=None, cluster_labels=None):
     """Structured two-side ``aux`` for a means-end game frame: BOTH sides'
     cluster goal, phase, and optional win-value estimate with the side-to-move
-    marked. Returns a dict ``{cols, to_move, rows}`` or ``[]`` defensively if a
-    side is missing."""
+    marked. When ``cluster_labels`` (the post-hoc characterizer's
+    {cluster_id: {label, features, n}} map) is available, the goal cell shows the
+    chess-feature label inline and ``tips`` carries the per-side delta fingerprint
+    for the LIVE view's hover tooltip. Returns ``{cols, to_move, rows, tips}`` or
+    ``[]`` defensively if a side is missing."""
     w = g.sides.get(chess.WHITE)
     b = g.sides.get(chess.BLACK)
     if w is None or b is None:
         return []
+    labels = cluster_labels or {}
 
     def goal_str(side):
-        return "win" if side.is_terminal() else f"cluster {side.active_cluster}"
+        if side.is_terminal():
+            return "win"
+        c = side.active_cluster
+        lab = labels.get(c, {}).get("label")
+        return f"cluster {c} — {lab}" if lab else f"cluster {c}"
 
     def phase_str(side):
         return "terminal" if side.is_terminal() else "pursuing"
@@ -549,6 +557,15 @@ def _meansend_aux(g, protagonist, estimator=None):
             return f"{estimator.win_value(side.active_cluster):+.2f}"
         return "—"  # em dash
 
+    def tip(side):
+        if side.is_terminal():
+            return None
+        info = labels.get(side.active_cluster)
+        if not info:
+            return None
+        return {"cluster": side.active_cluster, "label": info.get("label"),
+                "features": info.get("features", {})}
+
     return {
         "cols": ["White", "Black"],
         "to_move": 0 if protagonist == chess.WHITE else 1,
@@ -557,11 +574,12 @@ def _meansend_aux(g, protagonist, estimator=None):
             ["phase", phase_str(w), phase_str(b)],
             ["win-value", win_val_str(w), win_val_str(b)],
         ],
+        "tips": {"White": tip(w), "Black": tip(b)},
     }
 
 
 def _publish_meansend_move(publisher, g, chosen_move, root_q: float, top_moves: list,
-                           protagonist, estimator=None) -> None:
+                           protagonist, estimator=None, cluster_labels=None) -> None:
     """Publish one means-end game frame mirroring _publish_goal_move's payload
     schema, with a structured ``aux`` describing BOTH sides' cluster goal /
     phase / win-value with the side-to-move marked (see _meansend_aux)."""
@@ -574,7 +592,7 @@ def _publish_meansend_move(publisher, g, chosen_move, root_q: float, top_moves: 
         "top_moves": top_moves,
         "done": bool(g.done),
         "z": int(g.z) if g.done else None,
-        "aux": _meansend_aux(g, protagonist, estimator),
+        "aux": _meansend_aux(g, protagonist, estimator, cluster_labels),
     })
 
 
@@ -611,7 +629,7 @@ class _MeansEndGame:
 def play_meansend_games_concurrent(
     evaluator_vector, mcts_cfg, sp_cfg, goal_cfg, goalspace, win_vector, rng,
     num_games, explore: bool = False, publisher=None, game_id_prefix: str = "",
-    curriculum=None, estimator=None,
+    curriculum=None, estimator=None, cluster_labels=None,
 ) -> list:
     """Means-end concurrent self-play (v2). Each side pursues a discovered cluster
     goal (or the terminal objective) under the Plan 4a means-end MCTS; the switch
@@ -651,7 +669,7 @@ def play_meansend_games_concurrent(
         while any(t.root.visit_count < mcts_cfg.simulations + 1 for t in trees):
             mcts.step_round(trees)
         for g in active:
-            _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator)
+            _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator, cluster_labels)
 
     results = []
     for g in games:
@@ -664,7 +682,7 @@ def play_meansend_games_concurrent(
     return results
 
 
-def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator=None) -> None:
+def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng, publisher, estimator=None, cluster_labels=None) -> None:
     protagonist = g.board.turn
     side = g.sides[protagonist]
     visits = mcts.visit_counts(g.tree)
@@ -696,7 +714,7 @@ def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng
             if g.allow_resign and g.resign_streak[protagonist] >= sp_cfg.resign_consecutive:
                 g.z = -1 if protagonist == chess.WHITE else 1
                 g.done = True
-                _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator)
+                _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator, cluster_labels)
                 return
         else:
             g.resign_streak[protagonist] = 0
@@ -707,4 +725,4 @@ def _play_one_meansend_move(g, mcts, mcts_cfg, sp_cfg, goal_cfg, win_vector, rng
     g.ply += 1
     maybe_switch_cluster_to_terminal(side, g.ply, win_vector, goal_cfg.deadline_max)
     _goal_check_pre_move_termination(g, sp_cfg)
-    _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator)
+    _publish_meansend_move(publisher, g, chosen_move, root_q, top_moves, protagonist, estimator, cluster_labels)

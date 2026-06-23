@@ -311,7 +311,19 @@ def test_live(server, browser):
                 mod.renderAux(empty, []);
                 const emptyCount = empty.children.length;
                 mod.renderAux(empty, undefined);  // absent aux is a no-op too
-                return { pairs, emptyCount, emptyAfterUndefined: empty.children.length };
+                // Two-side table form: {cols, to_move, rows} -> aligned table
+                // with the to-move column marked. Renderer stays generic.
+                const tdiv = document.createElement('div');
+                mod.renderAux(tdiv, { cols: ['White', 'Black'], to_move: 0,
+                    rows: [['goal', 'capture knight', 'check'],
+                           ['phase', 'pursuing', 'resolved'],
+                           ['P(achieve)', '0.42', '0.55']] });
+                const table = tdiv.querySelector('table');
+                const headers = table ? [...table.querySelectorAll('th')].map(t => t.textContent) : [];
+                const cells = table ? [...table.querySelectorAll('td')].map(t => t.textContent) : [];
+                const tomoveMarked = !!(table && table.querySelector('.tomove'));
+                return { pairs, emptyCount, emptyAfterUndefined: empty.children.length,
+                         headers, cells, tomoveMarked };
             }"""
         )
         assert rendered["pairs"] == [
@@ -322,6 +334,43 @@ def test_live(server, browser):
         ], f"aux pairs not rendered generically: {rendered['pairs']!r}"
         assert rendered["emptyCount"] == 0, "empty aux should render nothing"
         assert rendered["emptyAfterUndefined"] == 0, "absent aux should render nothing"
+        # Two-side table form: both sides present, to-move column marked + highlighted.
+        assert "▸ White" in rendered["headers"] and "Black" in rendered["headers"], \
+            f"two-side headers wrong: {rendered['headers']!r}"
+        assert {"capture knight", "check", "pursuing", "resolved"} <= set(rendered["cells"]), \
+            f"two-side cells missing: {rendered['cells']!r}"
+        assert rendered["tomoveMarked"], "to-move column not highlighted"
+
+        # Cluster-goal hover tooltip: the goal cell shows the chess-feature label
+        # inline; hovering reveals the discovered cluster's delta fingerprint
+        # (label + per-feature deltas, zero deltas omitted). aux.tips drives it.
+        page.evaluate(
+            """async () => {
+                const mod = await import('/live.js');
+                const host = document.createElement('div');
+                host.id = 'tip-test';
+                document.body.appendChild(host);
+                mod.renderAux(host, {
+                    cols: ['White', 'Black'], to_move: 0,
+                    rows: [['goal', 'cluster 3 — win material (+1.1)', 'cluster 7'],
+                           ['phase', 'pursuing', 'pursuing']],
+                    tips: { White: { cluster: 3, label: 'win material (+1.1)',
+                                     features: { material: 1.1, captured: 1.0, lost: 0.0 } },
+                            Black: null }
+                });
+            }"""
+        )
+        assert "win material (+1.1)" in page.inner_text("#tip-test"), "inline label missing"
+        tip_sel = "#tip-test .aux-tip-host .aux-tip"
+        assert page.query_selector(tip_sel) is not None, "tooltip element missing"
+        display_before = page.eval_on_selector(tip_sel, "el => getComputedStyle(el).display")
+        assert display_before == "none", f"tooltip should start hidden, got {display_before!r}"
+        page.hover("#tip-test .aux-tip-host")
+        display_after = page.eval_on_selector(tip_sel, "el => getComputedStyle(el).display")
+        assert display_after != "none", "tooltip should appear on hover"
+        tip_text = page.inner_text(tip_sel)
+        assert "captured" in tip_text, f"feature row missing from tip: {tip_text!r}"
+        assert "lost" not in tip_text, f"zero-delta feature should be omitted: {tip_text!r}"
 
         _assert_no_console_errors(errors)
 

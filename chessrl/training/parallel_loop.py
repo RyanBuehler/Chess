@@ -335,14 +335,22 @@ def main(argv=None) -> Path:
     goalspace = None
     winvalue = None
     if emergent_mode:
-        frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
-        goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
-        buffer = VectorGoalReplayBuffer(
-            cfg.training.buffer_size, frozen_encoder, goalspace,
-            deadline_max=cfg.goal.deadline_max,
-        )
-        goalspace.save(run_dir / GOALSPACE_DIR)
-        winvalue = WinValueEstimator()
+        buffer = None  # set below: fresh init here, or loaded by the resume branch
+        if not args.resume:
+            # FRESH run only. On resume the persisted frozen encoder + GoalSpace +
+            # win-value are loaded by the resume branch below; snapshotting/saving
+            # here would CLOBBER the persisted (fit) goalspace and frozen_encoder.pt
+            # with fresh/empty state *before* the resume branch reloads them —
+            # silently disabling goal-conditioning (every game falls to terminal
+            # pursuit) and corrupting the embedding space.
+            frozen_encoder = snapshot_frozen_encoder(net, run_dir, cfg.network, trainer.device)
+            goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
+            buffer = VectorGoalReplayBuffer(
+                cfg.training.buffer_size, frozen_encoder, goalspace,
+                deadline_max=cfg.goal.deadline_max,
+            )
+            goalspace.save(run_dir / GOALSPACE_DIR)
+            winvalue = WinValueEstimator()
     elif goal_mode:
         # Goal runs use the HER goal buffer + BCE training; vanilla is unchanged.
         buffer = GoalReplayBuffer(cfg.training.buffer_size, deadline_max=cfg.goal.deadline_max)

@@ -17,12 +17,14 @@ from chessrl.training.cluster_her import cluster_goal_samples
 
 
 class VectorGoalReplayBuffer:
-    def __init__(self, capacity, embedder, goalspace, weights: HERWeights | None = None, deadline_max: int = 60):
+    def __init__(self, capacity, embedder, goalspace, weights: HERWeights | None = None,
+                 deadline_max: int = 60, lookahead_cap: int | None = None):
         self._data = deque(maxlen=capacity)
         self.embedder = embedder
         self.goalspace = goalspace
         self.weights = weights or HERWeights()
         self.deadline_max = deadline_max
+        self.lookahead_cap = lookahead_cap   # v3: cap HER achievement look-ahead (None = v2)
 
     def __len__(self):
         return len(self._data)
@@ -35,7 +37,7 @@ class VectorGoalReplayBuffer:
             rng = np.random.default_rng(seed)
         states = reconstruct_states(rec)
         samples = cluster_goal_samples(rec, states, self.embedder, self.goalspace, rng,
-                                       self.weights, self.deadline_max)
+                                       self.weights, self.deadline_max, self.lookahead_cap)
         for s in samples:
             board_planes = rec.planes[s.ply]
             p_idxs = p_cnts = None
@@ -76,8 +78,10 @@ class VectorGoalReplayBuffer:
 
     @classmethod
     def from_run_dir(cls, run_dir, capacity, embedder, goalspace,
-                     weights: HERWeights | None = None, deadline_max: int = 60):
-        buf = cls(capacity, embedder, goalspace, weights=weights, deadline_max=deadline_max)
+                     weights: HERWeights | None = None, deadline_max: int = 60,
+                     lookahead_cap: int | None = None):
+        buf = cls(capacity, embedder, goalspace, weights=weights, deadline_max=deadline_max,
+                  lookahead_cap=lookahead_cap)
         files = sorted((Path(run_dir) / "games").glob("*.npz"),
                        key=lambda p: (p.stat().st_mtime, p.name))
         selected, total = [], 0

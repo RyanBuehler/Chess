@@ -36,7 +36,8 @@ def _achieved_cluster(goalspace, emb, i, cluster, rem, T) -> bool:
 
 
 def cluster_goal_samples(rec, states, embedder, goalspace, rng,
-                         weights: HERWeights | None = None, deadline_max: int = 60):
+                         weights: HERWeights | None = None, deadline_max: int = 60,
+                         lookahead_cap: int | None = None):
     if not rec.has_cluster_goals():
         return []
     if getattr(goalspace, "centroids", None) is None:
@@ -54,6 +55,11 @@ def cluster_goal_samples(rec, states, embedder, goalspace, rng,
     emb = np.asarray(embedder.embed_boards(states), np.float32)
     for i in range(T_):
         rem = min(deadline_max, T_ - i)
+        if lookahead_cap is not None:
+            # v3: a chained sub-goal is only pursued for its own short window, so
+            # cap the achievement look-ahead (else a later, different pursuit drifting
+            # into this cluster's tau-ball would false-positive-label this ply).
+            rem = min(rem, lookahead_cap)
         active_cluster = int(rec.active_cluster[i])
         active_vec = np.asarray(rec.active_vec[i], np.float32)
         # active sample: outcome target (tanh head) + active-goal achievement (goal head).

@@ -88,9 +88,13 @@ class GoalConfig:
     delta_samples_per_game: int = 8  # deltas harvested per game into the reservoir (was hardcoded max_samples=8)
     epsilon: float = 0.15            # fraction of assignments that are uniform-random (interventional)
     gamma_winvalue: float = 1.0      # curriculum weight on win_value(g)
+    goal_select_temp: float = 0.5    # v3: softmax temp over curriculum_weight*v_goal
+    win_ramp: float = 0.6            # v3: |v_win| at which the alpha-schedule reaches 0
+    alpha_resign_gate: float = 0.05  # v3: allow resign only when alpha(s) <= this
+    endgame_margin: int = 20         # v3: force alpha=0 within this many plies of ply_cap
 
     def __post_init__(self):
-        if self.goal_mode not in ("none", "always_win", "random", "lp", "emergent"):
+        if self.goal_mode not in ("none", "always_win", "random", "lp", "emergent", "emergent_chained"):
             raise ValueError(f"bad goal_mode {self.goal_mode}")
         if not (0.0 <= self.epsilon <= 1.0):
             raise ValueError(f"epsilon must be in [0,1], got {self.epsilon}")

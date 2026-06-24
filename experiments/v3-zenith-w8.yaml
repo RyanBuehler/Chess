@@ -1,0 +1,50 @@
+# v3-zenith-w8: CHAINED means-end goals (segregated from v2-halcyon).
+# Identical to experiments/v2-stage1.yaml EXCEPT goal_mode (emergent_chained) and
+# the new chaining knobs, so goal-scale (goal_window=8) is the only difference vs a
+# future v3-zenith-w16. v2-halcyon (goal_mode: emergent) is byte-unaffected.
+run_name: v3-zenith-w8
+network:
+  blocks: 6
+  filters: 64
+  goal_cond: vector
+mcts:
+  simulations: 200
+  temperature_moves: 30
+  leaves_per_tree: 1
+  meansend_alpha: 0.25       # alpha_max for the v3 alpha-schedule
+selfplay:
+  workers: 12
+  concurrent_games: 32
+  ply_cap: 512
+  feed_port: 5559            # distinct from v2 (5555) so both can serve concurrently
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  buffer_size: 500000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 500
+  device: cuda
+  selfplay_device: cuda
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 8
+  agent_simulations: 200
+  max_plies: 200
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 50
+goal:
+  goal_mode: emergent_chained
+  cluster_k: 48
+  refresh_every: 2000
+  reservoir_size: 20000
+  min_reservoir: 1500
+  goal_window: 8
+  delta_samples_per_game: 16
+  win_floor: 0.2
+  deadline_max: 60
+  epsilon: 0.15
+  gamma_winvalue: 1.0
+  goal_select_temp: 0.5
+  win_ramp: 0.6
+  alpha_resign_gate: 0.05
+  endgame_margin: 20

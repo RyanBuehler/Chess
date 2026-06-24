@@ -27,14 +27,17 @@ def alpha_schedule(v_win: float, alpha_max: float, win_ramp: float,
 
 def select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng):
     """Greedy state-dependent next sub-goal: softmax over
-    curriculum_weight(g) * v_goal(board, centroid_g). Epsilon-explore injects a
-    uniform-random cluster. Requires goalspace.ready (caller guards). Returns
-    (cluster_id >= 0, centroid_vec)."""
+    curriculum_weight(g) * v_goal(board, centroid_g). With prob epsilon, inject a
+    uniform-random cluster (interventional). Requires goalspace.ready (caller
+    guards). Returns (cluster_id >= 0, centroid_vec, explored) where ``explored``
+    is THE SAME single epsilon draw that decides the pick — so the recorded
+    explore flag matches the actual exploration decision (the win-value estimator
+    is only de-confounded if these coincide)."""
     K = goalspace.n_clusters
     cents = np.asarray(goalspace.centroids, np.float32)            # (K, d)
     if rng.random() < getattr(goal_cfg, "epsilon", 0.0):
         c = int(rng.integers(K))
-        return c, cents[c].astype(np.float32)
+        return c, cents[c].astype(np.float32), True
     planes = to_model_input(encode_board(board))
     planes_batch = np.repeat(planes[None, ...], K, axis=0)
     deadlines = np.full(K, goal_cfg.goal_window, np.float32)
@@ -47,7 +50,7 @@ def select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng):
     p = np.exp(logits)
     p /= p.sum()
     c = int(rng.choice(K, p=p))
-    return c, cents[c].astype(np.float32)
+    return c, cents[c].astype(np.float32), False
 
 
 @dataclass
@@ -65,12 +68,12 @@ class _ChainSideGoal:
 
 
 def assign_chain_goal(board, ply, goalspace, curriculum, evaluator, goal_cfg, rng) -> _ChainSideGoal:
-    """Single entry that selects the next sub-goal, stamps the explore flag, and
-    caches the start-state embedding for live achievement detection."""
-    explore = rng.random() < getattr(goal_cfg, "epsilon", 0.0)
-    c, vec = select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng)
+    """Single entry that selects the next sub-goal, stamps the explore flag from
+    the SAME draw that made the pick (so the win-value estimator credits the truly
+    interventional segments), and caches the start-state embedding."""
+    c, vec, explored = select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng)
     start_emb = np.asarray(evaluator.embed_boards([board])[0], np.float32)
-    return _ChainSideGoal(c, vec, ply, start_emb, explore)
+    return _ChainSideGoal(c, vec, ply, start_emb, explored)
 
 
 def goal_achieved_live(side, board, goalspace, evaluator) -> bool:
@@ -140,19 +143,32 @@ def play_meansend_chained_games_concurrent(
 
     while any(not g.done for g in games):
         active = [g for g in games if not g.done]
+        # Per-ply alpha = alpha_schedule(root v_win). Batch the v_win eval over ALL
+        # active non-terminal games in one call (review I1) rather than one-per-game.
+        rem_by_id, alpha_by_id = {}, {}
+        nonterm = []
         for g in active:
             side = g.sides[g.board.turn]
             if side.is_terminal():
-                remaining = max(1, sp_cfg.ply_cap - g.ply)
-                a = 0.0
+                rem_by_id[id(g)] = max(1, sp_cfg.ply_cap - g.ply)
+                alpha_by_id[id(g)] = 0.0
             else:
-                remaining = max(1, goal_cfg.goal_window - (g.ply - side.start_ply))
-                planes = to_model_input(encode_board(g.board))[None]
-                vwin = float(evaluator_vector.win_value(planes, np.asarray([remaining], np.float32))[0])
-                a = alpha_schedule(vwin, mcts_cfg.meansend_alpha, goal_cfg.win_ramp,
-                                   g.ply, sp_cfg.ply_cap, goal_cfg.endgame_margin)
-            g.tree = mcts.init_tree_for_meansend(g.board, side.active_vec, remaining, add_noise=True)
-            g.tree.meansend_alpha = a
+                rem = max(1, goal_cfg.goal_window - (g.ply - side.start_ply))
+                rem_by_id[id(g)] = rem
+                nonterm.append((g, rem))
+        if nonterm:
+            planes_batch = np.stack([to_model_input(encode_board(g.board)) for g, _ in nonterm])
+            rems = np.asarray([rem for _, rem in nonterm], np.float32)
+            vwins = evaluator_vector.win_value(planes_batch, rems)
+            for (g, _rem), vwin in zip(nonterm, vwins):
+                alpha_by_id[id(g)] = alpha_schedule(
+                    float(vwin), mcts_cfg.meansend_alpha, goal_cfg.win_ramp,
+                    g.ply, sp_cfg.ply_cap, goal_cfg.endgame_margin)
+        for g in active:
+            side = g.sides[g.board.turn]
+            g.tree = mcts.init_tree_for_meansend(
+                g.board, side.active_vec, rem_by_id[id(g)], add_noise=True,
+                meansend_alpha=alpha_by_id[id(g)])
         trees = [g.tree for g in active]
         while any(t.root.visit_count < mcts_cfg.simulations + 1 for t in trees):
             mcts.step_round(trees)

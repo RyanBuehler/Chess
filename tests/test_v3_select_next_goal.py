@@ -28,11 +28,22 @@ def test_select_prefers_winvalued_achievable_cluster():
     for _ in range(10):
         est.update(1, True)                      # cluster 1 = win-valued
     cur = ClusterCurriculum(est, 3)
-    c, vec = select_next_goal(
+    c, vec, explored = select_next_goal(
         chess.Board(), _GS(), cur, _Eval(fav=1),
         GoalConfig(goal_mode="emergent_chained", goal_select_temp=0.01, epsilon=0.0),
         np.random.default_rng(0))
     assert c == 1 and vec.shape == (4,)
+    assert explored is False             # epsilon=0 => greedy pick, labelled not-explore
+
+
+def test_select_explore_flag_matches_the_pick():
+    # epsilon=1 => always the uniform-random branch => explored True (single coupled draw)
+    cur = ClusterCurriculum(WinValueEstimator(), 3)
+    c, vec, explored = select_next_goal(
+        chess.Board(), _GS(), cur, _Eval(fav=1),
+        GoalConfig(goal_mode="emergent_chained", epsilon=1.0),
+        np.random.default_rng(0))
+    assert explored is True and 0 <= c < 3
 
 
 def test_curriculum_weight_is_public_and_nonzero_via_novelty():

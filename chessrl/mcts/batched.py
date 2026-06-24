@@ -156,16 +156,20 @@ class BatchedMCTS:
         return tree
 
     def init_tree_for_meansend(
-        self, board: chess.Board, goal_vec, deadline: int, add_noise: bool = False
+        self, board: chess.Board, goal_vec, deadline: int, add_noise: bool = False,
+        meansend_alpha=None,
     ) -> SearchTree:
         """Means-end tree: vanilla negamax mechanics, but leaves are evaluated by
         the dual-head vector evaluator and the value is the alpha-blend. Carries
-        its own goal centroid + deadline origin. goal_mode stays False."""
+        its own goal centroid + deadline origin. goal_mode stays False. When
+        ``meansend_alpha`` is given it is set BEFORE the root seed expansion so the
+        whole tree (root seed included) uses the per-tree alpha (v3 schedule)."""
         if not self.meansend:
             raise ValueError("init_tree_for_meansend requires meansend=True")
         b = board.copy()
         tree = SearchTree(b, goal_vec=np.asarray(goal_vec, np.float32),
                           deadline_origin=int(deadline))
+        tree.meansend_alpha = meansend_alpha
         value = self._expand_leaf(tree, tree.root, plies_from_root=0)
         tree.root.visit_count += 1
         tree.root.value_sum += value

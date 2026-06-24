@@ -24,6 +24,12 @@ class WinValueEstimator:
         self._att[c] = self._att.get(c, 0) + 1
         self._wins[c] = self._wins.get(c, 0) + (1 if won else 0)
 
+    def credit_chain(self, clusters, won: bool) -> None:
+        """v3: credit every DISTINCT cluster pursued in a chain with the game
+        outcome (not just the first sub-goal). Terminal ids (<0) are skipped."""
+        for c in {int(x) for x in clusters if int(x) >= 0}:
+            self.update(c, won)
+
     @property
     def base_winrate(self) -> float:
         tot = sum(self._att.values())

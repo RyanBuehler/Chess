@@ -394,3 +394,11 @@ emergent-HRL projects die; earn it only if Stages 1–3 show discreteness is the
   ships, beats-or-loses-to-vanilla cleanly; can't easily tell whether a bad latent-first result
   is the goal space or the controller. Climb to continuous (Stage 4) only when earned.
 - Each stage = its own spec → plan → implement cycle. Stage 1 is the next spec.
+- **Run-codename lineage (2026-06-23):** `v2-halcyon` = Stage-1 flat goals (single ~8-ply subgoal
+  then win); Elo 853@5k → 924@10k, climbing, no v1-style collapse. `v3-zenith` = **win-gradient
+  greedy chaining**: on achieve/expire, reassign the next subgoal as the cluster whose centroid most
+  raises the net's win-value from the current state → sustained, state-dependent goal-direction
+  toward the win apex, *without* a learned goal-graph. **v4 = the Stage-2 learned goal→goal
+  transition graph** (`P(win | achieved g, pursue g′)`) — replaces v3's greedy heuristic with a
+  learned hierarchy + credit assignment (Ryan's "which subgoals carried the parent"); v3's greedy
+  is its baseline/bootstrap. So v3-zenith is a pragmatic intermediate between Stage 1 and Stage 2.

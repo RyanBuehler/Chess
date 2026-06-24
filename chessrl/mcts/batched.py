@@ -63,7 +63,7 @@ class SearchTree:
     + deadline and the per-game minimax/terminal algebra uses its OWN context."""
 
     __slots__ = ("root", "board", "sims_done", "baseline", "goal", "protagonist",
-                 "goal_vec", "deadline_origin")
+                 "goal_vec", "deadline_origin", "meansend_alpha")
 
     def __init__(self, board: chess.Board, baseline=None, goal=None, protagonist=None,
                  goal_vec=None, deadline_origin=None):
@@ -75,6 +75,9 @@ class SearchTree:
         self.protagonist = protagonist
         self.goal_vec = goal_vec
         self.deadline_origin = deadline_origin
+        # v3-zenith: per-tree means-end alpha override. None => use cfg.meansend_alpha
+        # (v2 never sets this, so the v2 means-end path is byte-for-byte unchanged).
+        self.meansend_alpha = None
 
 
 class BatchedMCTS:
@@ -234,7 +237,9 @@ class BatchedMCTS:
                 deadlines = np.asarray([p[4] for p in parked], dtype=np.float32)
                 policies, v_win, v_goal = self.evaluator.evaluate_planes(
                     planes_batch, goal_vecs, deadlines)
-                a = self.cfg.meansend_alpha
+                a = np.asarray(
+                    [(t.meansend_alpha if t.meansend_alpha is not None else self.cfg.meansend_alpha)
+                     for (t, *_rest) in parked], dtype=np.float32)
                 values = (1.0 - a) * v_win + a * (2.0 * v_goal - 1.0)
             elif self.goal_mode:
                 deadlines = np.asarray([p[4] for p in parked], dtype=np.float32)
@@ -409,7 +414,7 @@ class BatchedMCTS:
             bp = to_model_input(encode_board(board))[None]
             policies, v_win, v_goal = self.evaluator.evaluate_planes(
                 bp, tree.goal_vec[None], np.asarray([remaining], np.float32))
-            a = self.cfg.meansend_alpha
+            a = tree.meansend_alpha if tree.meansend_alpha is not None else self.cfg.meansend_alpha
             policy = policies[0]
             value = float((1.0 - a) * v_win[0] + a * (2.0 * v_goal[0] - 1.0))
             self._expand_from_idxs(node, idxs, policy, value)

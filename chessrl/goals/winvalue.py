@@ -76,6 +76,11 @@ class ClusterCurriculum:
     def _weight(self, c: int) -> float:
         return self.novelty_beta * self._novelty(c) + self.gamma_winvalue * max(0.0, self.est.win_value(c))
 
+    def weight(self, c: int) -> float:
+        """Public: the curriculum's per-cluster weight (novelty + win-value).
+        Used by v3's select_next_goal as the win-relevance factor."""
+        return self._weight(c)
+
     def sample(self, rng: np.random.Generator) -> int:
         if self.n_clusters <= 0 or rng.random() < self.win_floor:
             return -1

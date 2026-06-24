@@ -1,0 +1,48 @@
+# v3 end-to-end SMOKE: full chained emergent loop (self-play -> reservoir -> fit ->
+# CHAINED sub-goals -> training -> checkpoint) in minutes on CPU. NOT for real training.
+run_name: v3-smoke
+network:
+  blocks: 2
+  filters: 16
+  goal_cond: vector
+mcts:
+  simulations: 12
+  temperature_moves: 8
+  leaves_per_tree: 1
+  meansend_alpha: 0.25
+selfplay:
+  workers: 3
+  concurrent_games: 4
+  ply_cap: 24
+  feed_port: 0
+training:
+  batch_size: 16
+  learning_rate: 0.001
+  buffer_size: 5000
+  samples_per_position: 2.0
+  checkpoint_every_steps: 20
+  device: cpu
+  selfplay_device: cpu
+eval:
+  every_n_checkpoints: 1
+  games_per_rung: 4
+  agent_simulations: 12
+  max_plies: 24
+  stockfish_path: tools/stockfish/stockfish.exe
+  stockfish_movetime_ms: 20
+goal:
+  goal_mode: emergent_chained
+  cluster_k: 8
+  refresh_every: 50
+  reservoir_size: 2000
+  min_reservoir: 100
+  goal_window: 4
+  delta_samples_per_game: 8
+  win_floor: 0.2
+  deadline_max: 20
+  epsilon: 0.15
+  gamma_winvalue: 1.0
+  goal_select_temp: 0.5
+  win_ramp: 0.6
+  alpha_resign_gate: 0.05
+  endgame_margin: 8

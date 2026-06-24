@@ -11,11 +11,14 @@ from chessrl.selfplay.concurrent import (
 class ReadyGoalSpace:
     centroids = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
     ready = True
+    tau = 1.0
     def centroid(self, c):
         return self.centroids[c].copy()
     @property
     def n_clusters(self):
         return 3
+    def achieved(self, delta, c):   # v3 chained path; False => chaining driven by expiry
+        return False
 
 
 class UnfitGoalSpace:
@@ -66,6 +69,13 @@ class FakeVectorEval:
         n = planes.shape[0]
         pol = np.full((n, NUM_ACTIONS), 1.0 / NUM_ACTIONS, np.float32)
         return pol, np.zeros(n, np.float32), np.full(n, 0.5, np.float32)
+
+    def embed_boards(self, boards):   # v3 chained path
+        out = [[float(b.fullmove_number), float(len(b.piece_map())), 0.0, 0.0] for b in boards]
+        return np.asarray(out, np.float32)
+
+    def win_value(self, planes, deadlines):   # v3 chained path: neutral -> alpha stays high
+        return np.zeros(len(planes), np.float32)
 
 
 def test_meansend_selfplay_produces_cluster_records():

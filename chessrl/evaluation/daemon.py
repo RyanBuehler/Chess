@@ -85,9 +85,12 @@ def _default_agent_factory(agent_name, ckpt_path, run_cfg, cfg):
     VectorGoalMCTSPlayer; v1 goal arms (goal_mode != none) use GoalNetMCTSPlayer
     (spec sec 15); vanilla uses the plain NetMCTSPlayer. Shared by the daemon
     and the sweep."""
-    if run_cfg.goal.goal_mode == "emergent":
+    if run_cfg.goal.goal_mode in ("emergent", "emergent_chained"):
         from chessrl.evaluation.players import VectorGoalMCTSPlayer
 
+        # v3 (emergent_chained) is evaluated identically to v2: play to win =
+        # terminal pursuit on win_vector at alpha=0 (chaining is a self-play-only
+        # mechanism, irrelevant at eval time).
         return VectorGoalMCTSPlayer(
             agent_name, ckpt_path, run_cfg.network, cfg.agent_simulations, device="cpu",
         )

@@ -133,7 +133,7 @@ def _build_evaluator(run_dir, cfg: RunConfig, device: str, seed: int):
     VectorGoalNetEvaluator for emergent mode, or a BatchedGoalNetEvaluator
     (batched goal-conditioned net) for v1 goal modes."""
     ckpt = _newest_checkpoint(run_dir)
-    if cfg.goal.goal_mode == "emergent":
+    if cfg.goal.goal_mode in ("emergent", "emergent_chained"):
         if ckpt is not None:
             return VectorGoalNetEvaluator.from_checkpoint(ckpt, cfg.network, device=device)
         torch.manual_seed(seed)
@@ -187,7 +187,18 @@ def run_one_batch(
     All modes thread the live-feed publisher and per-game id prefix through.
     ``wv_curriculum`` (emergent mode) is the ClusterCurriculum built from the
     win-value estimator; passed to play_meansend_games_concurrent as ``curriculum``."""
-    if cfg.goal.goal_mode == "emergent":
+    if cfg.goal.goal_mode == "emergent_chained":
+        from chessrl.selfplay.meansend_chained import play_meansend_chained_games_concurrent
+        win_vector = evaluator.net.win_vector.detach().cpu().numpy()
+        results = play_meansend_chained_games_concurrent(
+            evaluator, cfg.mcts, cfg.selfplay, cfg.goal, goalspace, win_vector, rng,
+            num_games=cfg.selfplay.concurrent_games,
+            curriculum=wv_curriculum,
+            publisher=publisher,
+            game_id_prefix=f"w{worker_id:02d}_b{batch_index}_",
+            cluster_labels=cluster_labels,
+        )
+    elif cfg.goal.goal_mode == "emergent":
         win_vector = evaluator.net.win_vector.detach().cpu().numpy()
         results = play_meansend_games_concurrent(
             evaluator, cfg.mcts, cfg.selfplay, cfg.goal, goalspace, win_vector, rng,
@@ -270,7 +281,7 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
             newest = _newest_checkpoint(run_dir)
             if newest is not None and newest != loaded_ckpt:
                 try:
-                    if cfg.goal.goal_mode == "emergent":
+                    if cfg.goal.goal_mode in ("emergent", "emergent_chained"):
                         evaluator = VectorGoalNetEvaluator.from_checkpoint(
                             newest, cfg.network, device=resolved_device
                         )
@@ -299,7 +310,7 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                 except Exception:
                     pass
             # Reload the goalspace when meta.json mtime changes (emergent mode).
-            if cfg.goal.goal_mode == "emergent" and gs_meta_path.exists():
+            if cfg.goal.goal_mode in ("emergent", "emergent_chained") and gs_meta_path.exists():
                 try:
                     m = gs_meta_path.stat().st_mtime
                     if m != gs_mtime:
@@ -312,7 +323,7 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                 except Exception:
                     pass
             # Reload win-value curriculum when winvalue.json mtime changes (emergent mode).
-            if cfg.goal.goal_mode == "emergent" and wv_path.exists():
+            if cfg.goal.goal_mode in ("emergent", "emergent_chained") and wv_path.exists():
                 try:
                     m = wv_path.stat().st_mtime
                     if m != wv_mtime:
@@ -321,7 +332,7 @@ def worker_main(worker_id: int, run_dir: str, stop_path: str, device: str) -> No
                 except Exception:
                     pass
             # Reload cluster labels when cluster_labels.json mtime changes (emergent).
-            if cfg.goal.goal_mode == "emergent" and cl_path.exists():
+            if cfg.goal.goal_mode in ("emergent", "emergent_chained") and cl_path.exists():
                 try:
                     m = cl_path.stat().st_mtime
                     if m != cl_mtime:

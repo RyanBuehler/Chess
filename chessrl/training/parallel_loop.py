@@ -76,6 +76,33 @@ def update_winvalue_from_record(estimator, rec) -> None:
                 break
 
 
+def update_winvalue_chain_from_record(estimator, rec) -> None:
+    """v3 (chained): credit EACH distinct cluster pursued during an epsilon-explore
+    segment with the game outcome — not just the first sub-goal (review I3). Uses
+    rec.active_cluster (the per-ply pursued cluster) + per-ply explore flags."""
+    if not rec.has_cluster_goals():
+        return
+
+    def _is_white(i: int) -> bool:
+        if rec.protagonist is not None:
+            return int(rec.protagonist[i]) == 1
+        return (i % 2) == 0
+
+    z_white = None
+    for i in range(len(rec)):
+        z_white = int(rec.outcomes[i]) if _is_white(i) else -int(rec.outcomes[i])
+        break
+    if z_white is None or z_white == 0:   # skip draws (review Bug 2)
+        return
+    for white_side, won in ((True, z_white > 0), (False, z_white < 0)):
+        clusters = set()
+        for i in range(len(rec)):
+            if _is_white(i) == white_side and bool(rec.explore[i]) and int(rec.active_cluster[i]) >= 0:
+                clusters.add(int(rec.active_cluster[i]))
+        if clusters:
+            estimator.credit_chain(clusters, won)
+
+
 def snapshot_frozen_encoder(net, run_dir, network_cfg, device) -> "VectorGoalNetEvaluator":
     """Save net.state_dict() to run_dir/frozen_encoder.pt (atomic) and return a
     VectorGoalNetEvaluator loaded from it."""
@@ -325,7 +352,9 @@ def main(argv=None) -> Path:
     rng = np.random.default_rng(seed + baseline_games)
 
     goal_mode = cfg.goal.goal_mode != "none"
-    emergent_mode = cfg.goal.goal_mode == "emergent"
+    emergent_mode = cfg.goal.goal_mode in ("emergent", "emergent_chained")
+    chained = cfg.goal.goal_mode == "emergent_chained"  # v3: chained means-end
+    lookahead_cap = cfg.goal.goal_window if chained else None
     net = PolicyValueNet(cfg.network, goal_conditioned=goal_mode)
     trainer = Trainer(net, cfg.training, run_dir)
 
@@ -347,7 +376,7 @@ def main(argv=None) -> Path:
             goalspace = GoalSpace(cfg.goal, frozen_encoder, rng)
             buffer = VectorGoalReplayBuffer(
                 cfg.training.buffer_size, frozen_encoder, goalspace,
-                deadline_max=cfg.goal.deadline_max,
+                deadline_max=cfg.goal.deadline_max, lookahead_cap=lookahead_cap,
             )
             goalspace.save(run_dir / GOALSPACE_DIR)
             winvalue = WinValueEstimator()
@@ -400,7 +429,7 @@ def main(argv=None) -> Path:
             winvalue = WinValueEstimator.load(wv_path) if wv_path.exists() else WinValueEstimator()
             buffer = VectorGoalReplayBuffer.from_run_dir(
                 run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
-                deadline_max=cfg.goal.deadline_max,
+                deadline_max=cfg.goal.deadline_max, lookahead_cap=lookahead_cap,
             )
         elif goal_mode:
             buffer = GoalReplayBuffer.from_run_dir(
@@ -441,7 +470,7 @@ def main(argv=None) -> Path:
                     run_dir, buffer, ingested,
                     on_record=lambda rec: (
                         observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=cfg.goal.delta_samples_per_game, rng=rng),
-                        update_winvalue_from_record(winvalue, rec),
+                        (update_winvalue_chain_from_record if chained else update_winvalue_from_record)(winvalue, rec),
                     ),
                 )
                 games_seen += added
@@ -459,7 +488,7 @@ def main(argv=None) -> Path:
                     frozen_encoder = new_enc
                     buffer = VectorGoalReplayBuffer.from_run_dir(
                         run_dir, cfg.training.buffer_size, frozen_encoder, goalspace,
-                        deadline_max=cfg.goal.deadline_max,
+                        deadline_max=cfg.goal.deadline_max, lookahead_cap=lookahead_cap,
                     )
                     goalspace.save(run_dir / GOALSPACE_DIR)
                     # Describe the freshly-fit clusters for the LIVE view (best-effort;
@@ -581,7 +610,7 @@ def main(argv=None) -> Path:
                 run_dir, buffer, ingested,
                 on_record=lambda rec: (
                     observe_game_deltas(goalspace, rec, frozen_encoder, max_samples=cfg.goal.delta_samples_per_game, rng=rng),
-                    update_winvalue_from_record(winvalue, rec),
+                    (update_winvalue_chain_from_record if chained else update_winvalue_from_record)(winvalue, rec),
                 ),
             )
             if goalspace is not None:

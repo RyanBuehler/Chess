@@ -7,6 +7,8 @@ leaf alpha) fades to 0 as the position becomes decisive (alpha_schedule). 'Win a
 apex' emerges from alpha->0; there is no discrete terminal goal during play."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import chess
 
@@ -46,3 +48,36 @@ def select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng):
     p /= p.sum()
     c = int(rng.choice(K, p=p))
     return c, cents[c].astype(np.float32)
+
+
+@dataclass
+class _ChainSideGoal:
+    active_cluster: int
+    active_vec: np.ndarray
+    start_ply: int
+    start_emb: np.ndarray      # frozen-encoder embedding of the state where this goal began
+    explore: bool = False
+
+
+def assign_chain_goal(board, ply, goalspace, curriculum, evaluator, goal_cfg, rng) -> _ChainSideGoal:
+    """Single entry that selects the next sub-goal, stamps the explore flag, and
+    caches the start-state embedding for live achievement detection."""
+    explore = rng.random() < getattr(goal_cfg, "epsilon", 0.0)
+    c, vec = select_next_goal(board, goalspace, curriculum, evaluator, goal_cfg, rng)
+    start_emb = np.asarray(evaluator.embed_boards([board])[0], np.float32)
+    return _ChainSideGoal(c, vec, ply, start_emb, explore)
+
+
+def goal_achieved_live(side, board, goalspace, evaluator) -> bool:
+    emb = np.asarray(evaluator.embed_boards([board])[0], np.float32)
+    return bool(goalspace.achieved((emb - side.start_emb).astype(np.float32), side.active_cluster))
+
+
+def maybe_reassign_goal(side, board, ply, goalspace, curriculum, evaluator, goal_cfg, rng):
+    """Reassign (new _ChainSideGoal) when the active sub-goal is achieved (live)
+    OR has been pursued for goal_window plies; else return the same side-goal."""
+    expired = (ply - side.start_ply) >= goal_cfg.goal_window
+    achieved = goal_achieved_live(side, board, goalspace, evaluator)
+    if expired or achieved:
+        return assign_chain_goal(board, ply, goalspace, curriculum, evaluator, goal_cfg, rng)
+    return side
